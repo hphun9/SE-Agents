@@ -28,8 +28,5 @@ MODELS: dict[str, str] = {
     "qa":             SONNET,
 }
 
-# Models that support adaptive thinking (do NOT use with Haiku)
-THINKING_MODELS: set[str] = {SONNET, OPUS}
-
 # BA clarification limits
 MAX_BA_ROUNDS = 4

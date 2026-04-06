@@ -22,8 +22,7 @@ def _require(key: str) -> str:
 
 
 def main() -> None:
-    telegram_token  = _require("TELEGRAM_BOT_TOKEN")
-    _require("ANTHROPIC_API_KEY")   # validated here; used by core/claude.py
+    telegram_token = _require("TELEGRAM_BOT_TOKEN")
 
     log.info("Starting SE-Agents")
     log.info("Pipeline: BA(Haiku/Sonnet) → SA(Opus) → PM(Sonnet) → Tech Lead(Opus)")

@@ -1,43 +1,57 @@
 """
-Async Claude API wrapper.
+Claude wrapper — routes calls through the `claude` CLI so they use
+your Max subscription instead of direct API credits.
 
-Uses streaming + get_final_message() to handle large outputs without timeout.
-Adaptive thinking is enabled for Sonnet/Opus only (not Haiku).
+Requires the `claude` CLI to be installed and authenticated:
+  https://claude.ai/code
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import re
-import anthropic
-from config import THINKING_MODELS
-
-_client = anthropic.AsyncAnthropic()
 
 
 async def call_claude(
     model: str,
     system: str,
     messages: list[dict],
-    max_tokens: int = 16_000,
+    max_tokens: int = 16_000,   # kept for signature compatibility; CLI uses its own default
 ) -> str:
-    """Call Claude and return the text response."""
-    kwargs: dict = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": messages,
-    }
-    if model in THINKING_MODELS:
-        kwargs["thinking"] = {"type": "adaptive"}
+    """Call Claude via `claude -p` and return the text response."""
+    parts: list[str] = []
+    if system:
+        parts.append(system)
 
-    async with _client.messages.stream(**kwargs) as stream:
-        response = await stream.get_final_message()
+    for msg in messages:
+        role = "Human" if msg["role"] == "user" else "Assistant"
+        content = msg["content"]
+        if isinstance(content, list):
+            # Flatten content-block arrays (e.g. from multi-turn BA history)
+            content = " ".join(
+                b.get("text", "")
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        parts.append(f"{role}: {content}")
 
-    for block in response.content:
-        if block.type == "text":
-            return block.text
+    full_prompt = "\n\n".join(parts)
 
-    raise ValueError(f"Claude ({model}) returned no text content")
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "-p", full_prompt, "--model", model,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        err = stderr.decode().strip()
+        raise RuntimeError(f"claude CLI error (model={model}): {err}")
+
+    # Strip ANSI escape codes in case the CLI emits them
+    text = stdout.decode()
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return text.strip()
 
 
 def parse_json(raw: str) -> dict:
