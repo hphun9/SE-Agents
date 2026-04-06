@@ -1,148 +1,214 @@
-# 🏗️ The Dev Agency: AI Software Development Team
+# SE-Agents — AI Software Development Team via Telegram
 
-> **A complete software development agency at your fingertips** — From business analysts who interrogate requirements to DevOps engineers who automate everything. Each agent is a battle-tested specialist with deep domain expertise, proven workflows, and measurable deliverables.
-
----
-
-## 🚀 What Is This?
-
-**The Dev Agency** is a collection of meticulously crafted AI agent personalities covering the **full software development lifecycle (SDLC)**. Each agent embodies a real-world role with:
-
-- **🎯 Deep Specialization**: Not generic prompts — real domain expertise with workflows
-- **🧠 Personality & Voice**: Unique communication style matching the role
-- **📋 Concrete Deliverables**: Templates, code examples, and measurable outputs
-- **✅ Process-Driven**: Step-by-step workflows from real-world methodologies
-- **🔄 Collaborative**: Agents reference each other's outputs as inputs
+> You describe a project. The team asks clarifying questions, you approve the plan, and the dev team delivers implementation guides — all through Telegram.
 
 ---
 
-## ⚡ Quick Start
+## How It Works
 
-### Use with Claude Code
+```
+You (Telegram)
+   │
+   ▼ requirement text
+┌──────────────────────────────────────────────────────────┐
+│  BA  ──clarification loop (up to 4 rounds)──►  BRD       │  Haiku / Sonnet
+│  SA  ──► Architecture Document                           │  Opus
+│  PM  ──► Project Plan                                    │  Sonnet
+│  TL  ──► Technical Specification                         │  Opus
+└──────────────────────────────────────────────────────────┘
+   │
+   ▼  📋 "Approve or Request Changes?" (inline buttons)
+   │
+   ▼ ✅ Approved
+┌──────────────────────────────────────────────────────────┐
+│  Backend Dev  ──► Implementation Guide + code   (Opus)   │
+│  Frontend Dev ──► Implementation Guide + code   (Sonnet) │  (parallel)
+│  QA           ──► Test Plan + test code         (Sonnet) │
+└──────────────────────────────────────────────────────────┘
+   │
+   ▼ All documents delivered to you in Telegram
+```
+
+### Key design principles
+
+| Principle | Detail |
+|-----------|--------|
+| **Structured inter-agent comms** | Every agent-to-agent message is a typed `AgentMessage` JSON envelope — no natural language between agents |
+| **Model tiering** | Haiku → fast Q&A · Sonnet → structured docs · Opus → complex reasoning & code |
+| **Approval gate** | Planning phase pauses; you review and either approve or provide feedback |
+| **Parallel dev** | Backend Dev and Frontend Dev run concurrently after approval |
+| **Async Python** | `asyncio` + `AsyncAnthropic` — non-blocking pipeline |
+
+---
+
+## Agents & Model Assignments
+
+| Agent | Model | Task |
+|-------|-------|------|
+| **BA** (clarify) | `claude-haiku-4-5` | Generates clarifying questions — fast & cheap |
+| **BA** (BRD) | `claude-sonnet-4-6` | Produces Business Requirements Document |
+| **Solution Architect** | `claude-opus-4-6` | Architecture design, ADRs, tech stack decisions |
+| **Project Manager** | `claude-sonnet-4-6` | Project plan, phases, risks, milestones |
+| **Tech Lead** | `claude-opus-4-6` | API design, data models, sprint plan, tech spec |
+| **Backend Dev** | `claude-opus-4-6` | Scaffold + real implementation code |
+| **Frontend Dev** | `claude-sonnet-4-6` | Components + real UI code |
+| **QA Engineer** | `claude-sonnet-4-6` | Test plan, test cases, CI config |
+
+---
+
+## Project Structure
+
+```
+se-agents/
+│
+├── main.py                  ← entry point
+├── config.py                ← model assignments & constants
+├── requirements.txt
+├── .env.example
+│
+├── core/
+│   ├── models.py            ← AgentMessage envelope, SessionState, dataclasses
+│   ├── claude.py            ← async Claude API wrapper (streaming)
+│   └── formatter.py         ← Telegram MarkdownV2 formatters per document type
+│
+├── agents/
+│   ├── ba.py                ← BA: multi-round clarification loop → BRD
+│   ├── sa.py                ← SA: BRD → Architecture Document
+│   ├── pm.py                ← PM: BRD + Arch → Project Plan
+│   ├── tech_lead.py         ← Tech Lead: all 3 → Technical Spec
+│   ├── dev_backend.py       ← Backend Dev: spec → implementation guide + code
+│   ├── dev_frontend.py      ← Frontend Dev: spec → implementation guide + code
+│   ├── qa.py                ← QA: spec + impls → test plan + test code
+│   └── orchestrator.py      ← state machine, session store, pipeline runner
+│
+├── bot/
+│   └── telegram.py          ← python-telegram-bot v21, inline keyboard approval
+│
+└── src/                     ← legacy TypeScript prototype (reference only)
+    └── ...
+```
+
+---
+
+## Setup
+
+### 1. Prerequisites
+
+- Python 3.11+
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- An [Anthropic API key](https://console.anthropic.com)
+
+### 2. Install
+
 ```bash
-cp -r dev-agency/* ~/.claude/agents/
-# "Activate the Business Analyst agent and help me gather requirements for a new e-commerce platform"
+pip install -r requirements.txt
 ```
 
-### Use with Cursor
+### 3. Configure
+
 ```bash
-cp dev-agency/**/*.md .cursor/rules/
+cp .env.example .env
+# Edit .env and fill in:
+#   ANTHROPIC_API_KEY=sk-ant-...
+#   TELEGRAM_BOT_TOKEN=123456789:AAF...
 ```
 
-### Use as Reference
-Browse each agent file — copy/adapt the workflows and deliverables you need.
+### 4. Run
+
+```bash
+python main.py
+```
 
 ---
 
-## 🎨 The Dev Agency Roster
+## Usage
 
-### 📊 Business Analysis Division
-Turning chaos into clarity — understanding the "what" and "why" before anyone writes code.
+| Action | What to do |
+|--------|-----------|
+| Start a project | Send any text message with your requirement |
+| Answer clarification | Reply to the BA's questions in one message |
+| Approve plan | Tap **✅ Approve — Start Dev Team** |
+| Request changes | Tap **📝 Request Changes**, then describe what to change |
+| New project | Send `/new` or just send a new requirement after completion |
+| Check status | Send `/status` |
 
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 📋 [Business Analyst](business-analysis/ba-business-analyst.md) | Requirements engineering, stakeholder management, process modeling | Requirements gathering, user stories, BRD/SRS documents |
-| 🔍 [Product Owner](business-analysis/ba-product-owner.md) | Backlog ownership, acceptance criteria, value prioritization | Sprint planning, backlog grooming, feature prioritization |
+### Example flow
 
-### 🏛️ Solution Architecture Division
-Designing systems that scale, survive, and evolve.
+```
+You:  "I want to build a SaaS task management app for small dev teams"
 
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 🏗️ [Solution Architect](solution-architecture/sa-solution-architect.md) | System design, technology selection, NFRs, integration patterns | Architecture decisions, tech stack selection, system design docs |
-| 🔐 [Security Architect](solution-architecture/sa-security-architect.md) | Threat modeling, auth design, compliance, OWASP | Security reviews, auth flows, compliance requirements |
-| 📐 [Data Architect](solution-architecture/sa-data-architect.md) | Data modeling, database design, migration strategy, ETL | Schema design, data flow, database selection, migration planning |
+BA:   "Round 1 — I need clarification:
+       1. Web only, mobile, or both?
+       2. Real-time collaboration or async?
+       3. What integrations? (GitHub, Slack, etc.)"
 
-### 🎬 Project Management Division
-Delivering on time, on scope, on budget.
+You:  "Web only for now. Real-time. GitHub and Slack integrations."
 
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 📅 [Project Manager](project-management/pm-project-manager.md) | Planning, risk management, stakeholder communication, budgets | Project kickoff, status reporting, risk mitigation, resource planning |
-| 🏃 [Scrum Master](project-management/pm-scrum-master.md) | Agile ceremonies, impediment removal, team health, velocity | Sprint ceremonies, retrospectives, process improvement |
-| 🗺️ [Technical Program Manager](project-management/pm-technical-program-manager.md) | Cross-team coordination, dependency management, release planning | Multi-team programs, release trains, dependency tracking |
+BA:   "Requirements confirmed! ✅"
+      [Delivers BRD]
 
-### 💻 Development Division
-Building the thing right — clean, tested, documented code.
+SA:   [Delivers Architecture Document]
+PM:   [Delivers Project Plan]
+TL:   [Delivers Technical Specification]
 
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 🎨 [Frontend Developer](development/dev-frontend.md) | React/Vue/Angular, state management, responsive design, a11y | UI implementation, SPA development, component libraries |
-| 🏗️ [Backend Developer](development/dev-backend.md) | API design, microservices, databases, message queues, caching | REST/GraphQL APIs, server-side logic, data processing |
-| 📱 [Fullstack Developer](development/dev-fullstack.md) | End-to-end features, rapid prototyping, vertical slices | Full feature delivery, MVPs, startup-speed development |
-| ⚡ [Tech Lead](development/dev-tech-lead.md) | Code reviews, mentoring, technical decisions, standards | Architecture enforcement, PR reviews, team standards |
+Bot:  "📋 Planning complete! Approve or request changes?"
+      [✅ Approve — Start Dev Team]  [📝 Request Changes]
 
-### 🧪 Quality Assurance Division
-Breaking things before users do — systematically.
+You:  ✅ Approve
 
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 🔍 [QA Engineer](quality-assurance/qa-engineer.md) | Test planning, manual/exploratory testing, bug reporting | Test case design, regression testing, UAT coordination |
-| 🤖 [Automation Engineer](quality-assurance/qa-automation-engineer.md) | Selenium/Playwright/Cypress, CI integration, test frameworks | E2E test automation, API testing, test pipeline setup |
-| ⚡ [Performance Tester](quality-assurance/qa-performance-tester.md) | Load testing, stress testing, profiling, bottleneck analysis | JMeter/k6/Gatling, performance benchmarks, capacity planning |
+Backend Dev:   [Delivers implementation guide + FastAPI code]
+Frontend Dev:  [Delivers implementation guide + React code]   ← parallel
+QA:            [Delivers test plan + pytest/Playwright tests]
 
-### 🚀 DevOps & Infrastructure Division
-Automate everything, monitor everything, recover from everything.
-
-| Agent | Specialty | When to Use |
-|-------|-----------|-------------|
-| 🔧 [DevOps Engineer](devops/devops-engineer.md) | CI/CD, Docker, Kubernetes, IaC, monitoring | Pipeline setup, containerization, deployment automation |
-| ☁️ [Cloud Architect](devops/devops-cloud-architect.md) | AWS/Azure/GCP, cost optimization, multi-cloud | Cloud migration, infrastructure design, cost analysis |
-| 🛡️ [SRE](devops/devops-sre.md) | SLOs/SLIs, incident response, chaos engineering, observability | Production reliability, on-call processes, postmortems |
+Bot:  "🎉 All done!"
+```
 
 ---
 
-## 🔄 SDLC Workflow: How Agents Collaborate
+## Inter-Agent Message Format
 
-```
-┌─────────────┐     ┌──────────────┐     ┌────────────────┐
-│  Business    │────▶│  Solution    │────▶│  Project       │
-│  Analyst     │     │  Architect   │     │  Manager       │
-│  + Product   │     │  + Security  │     │  + Scrum       │
-│    Owner     │     │  + Data      │     │    Master      │
-└─────────────┘     └──────────────┘     └────────────────┘
-                                                  │
-                         ┌────────────────────────┘
-                         ▼
-              ┌─────────────────────┐
-              │  Development        │
-              │  Frontend + Backend │
-              │  + Tech Lead        │
-              └─────────┬───────────┘
-                        │
-              ┌─────────▼───────────┐
-              │  Quality Assurance  │
-              │  QA + Automation    │
-              │  + Performance      │
-              └─────────┬───────────┘
-                        │
-              ┌─────────▼───────────┐
-              │  DevOps / SRE       │
-              │  CI/CD + Cloud      │
-              │  + Monitoring       │
-              └─────────────────────┘
+All agent-to-agent messages use a structured JSON envelope:
+
+```json
+{
+  "type": "REQUIREMENTS_CONFIRMED",
+  "from_role": "BA",
+  "to_role": "ORCHESTRATOR",
+  "payload": { "brd": { ... } },
+  "metadata": {
+    "timestamp": "2026-04-06T10:00:00",
+    "project_id": "abc123",
+    "session_id": "def456",
+    "version": "1.0"
+  }
+}
 ```
 
-### Scenario: Building an E-Commerce Platform
-
-1. **Business Analyst** → Gathers requirements, creates user stories & BRD
-2. **Product Owner** → Prioritizes backlog, defines acceptance criteria
-3. **Solution Architect** → Designs system architecture, selects tech stack
-4. **Security Architect** → Threat models auth, payment, data flows
-5. **Data Architect** → Designs DB schema, data migration plan
-6. **Project Manager** → Creates WBS, timeline, resource plan
-7. **Scrum Master** → Sets up sprints, ceremonies, team agreements
-8. **Tech Lead** → Defines coding standards, PR process, branching strategy
-9. **Frontend Developer** → Builds UI components, pages, state management
-10. **Backend Developer** → Builds APIs, business logic, integrations
-11. **QA Engineer** → Writes test cases, executes regression & UAT
-12. **Automation Engineer** → Automates E2E tests, integrates into CI
-13. **Performance Tester** → Load tests checkout flow, identifies bottlenecks
-14. **DevOps Engineer** → Sets up CI/CD, containers, monitoring
-15. **SRE** → Defines SLOs, sets up alerting, runs game days
+No natural language between agents — only in Telegram-facing output.
 
 ---
 
-## 📜 License
+## Agent Definition Files
 
-MIT License — Use freely. Attribution appreciated.
+The `.md` files in the root are detailed agent persona definitions for use with Claude Code CLI or Cursor IDE as standalone agents:
+
+| File | Role |
+|------|------|
+| `ba-business-analyst.md` | Requirements engineering |
+| `ba-product-owner.md` | Backlog ownership |
+| `sa-solution-architect.md` | System design |
+| `sa-security-architect.md` | Security & compliance |
+| `sa-data-architect.md` | Data modeling |
+| `pm-project-manager.md` | Planning & delivery |
+| `pm-scrum-master.md` | Agile ceremonies |
+| `pm-technical-program-manager.md` | Cross-team coordination |
+| `dev-tech-lead.md` | Code standards & reviews |
+| `dev-backend.md` | API & microservices |
+| `dev-frontend.md` | React/Vue/Angular |
+| `dev-fullstack.md` | Feature ownership |
+| `qa-engineer.md` | Test planning |
+| `qa-automation-engineer.md` | E2E automation |
+| `qa-performance-tester.md` | Load testing |
+| `devops-engineer.md` | CI/CD & containers |
+| `devops-cloud-architect.md` | Cloud infrastructure |
+| `devops-sre.md` | Observability & SLOs |
