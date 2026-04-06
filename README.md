@@ -190,25 +190,25 @@ No natural language between agents — only in Telegram-facing output.
 
 ## Agent Definition Files
 
-The `.md` files in the root are detailed agent persona definitions for use with Claude Code CLI or Cursor IDE as standalone agents:
+The `roles/` folder contains detailed agent persona definitions for use with Claude Code CLI or Cursor IDE as standalone agents:
 
 | File | Role |
 |------|------|
-| `ba-business-analyst.md` | Requirements engineering |
-| `ba-product-owner.md` | Backlog ownership |
-| `sa-solution-architect.md` | System design |
-| `sa-security-architect.md` | Security & compliance |
-| `sa-data-architect.md` | Data modeling |
-| `pm-project-manager.md` | Planning & delivery |
-| `pm-scrum-master.md` | Agile ceremonies |
-| `pm-technical-program-manager.md` | Cross-team coordination |
-| `dev-tech-lead.md` | Code standards & reviews |
-| `dev-backend.md` | API & microservices |
-| `dev-frontend.md` | React/Vue/Angular |
-| `dev-fullstack.md` | Feature ownership |
-| `qa-engineer.md` | Test planning |
-| `qa-automation-engineer.md` | E2E automation |
-| `qa-performance-tester.md` | Load testing |
-| `devops-engineer.md` | CI/CD & containers |
-| `devops-cloud-architect.md` | Cloud infrastructure |
-| `devops-sre.md` | Observability & SLOs |
+| `roles/ba-business-analyst.md` | Requirements engineering |
+| `roles/ba-product-owner.md` | Backlog ownership |
+| `roles/sa-solution-architect.md` | System design |
+| `roles/sa-security-architect.md` | Security & compliance |
+| `roles/sa-data-architect.md` | Data modeling |
+| `roles/pm-project-manager.md` | Planning & delivery |
+| `roles/pm-scrum-master.md` | Agile ceremonies |
+| `roles/pm-technical-program-manager.md` | Cross-team coordination |
+| `roles/dev-tech-lead.md` | Code standards & reviews |
+| `roles/dev-backend.md` | API & microservices |
+| `roles/dev-frontend.md` | React/Vue/Angular |
+| `roles/dev-fullstack.md` | Feature ownership |
+| `roles/qa-engineer.md` | Test planning |
+| `roles/qa-automation-engineer.md` | E2E automation |
+| `roles/qa-performance-tester.md` | Load testing |
+| `roles/devops-engineer.md` | CI/CD & containers |
+| `roles/devops-cloud-architect.md` | Cloud infrastructure |
+| `roles/devops-sre.md` | Observability & SLOs |
