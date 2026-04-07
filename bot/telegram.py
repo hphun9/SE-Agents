@@ -28,6 +28,7 @@ from agents.orchestrator import (
     handle_change_request,
     handle_change_feedback,
 )
+from agents.consult import consult_agent, resolve_role, list_roles
 from core.models import SessionState
 from core.formatter import split_message
 
@@ -171,9 +172,56 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/start — Welcome\n"
         "/new — Start fresh project\n"
         "/status — Pipeline status\n"
+        "/ask \\<role\\> \\<message\\> — Consult a specific agent directly\n"
         "/help — This message\n\n"
-        "Just send your requirement as a plain message to begin\\!",
+        "Just send your requirement as a plain message to begin\\!\n\n"
+        f"*Available roles for /ask:*\n{list_roles()}",
     )
+
+
+async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Directly consult a specific agent role.
+
+    Usage: /ask <role> <message>
+    Example: /ask dev fix the auth bug — getting 401 on every request
+    """
+    chat_id = update.effective_chat.id
+    args = (context.args or [])
+
+    if not args:
+        await _send(
+            context.bot, chat_id,
+            "Usage: `/ask <role> <message>`\n\n"
+            f"*Available roles:*\n{list_roles()}",
+        )
+        return
+
+    role_key = resolve_role(args[0])
+    if not role_key:
+        await _send(
+            context.bot, chat_id,
+            f"Unknown role: `{_esc(args[0])}`\n\n"
+            f"*Available roles:*\n{list_roles()}",
+        )
+        return
+
+    question = " ".join(args[1:]).strip()
+    if not question:
+        await _send(context.bot, chat_id, "Please include your question after the role name\\.")
+        return
+
+    session = get_session(chat_id)
+
+    async def _run() -> None:
+        await _send(context.bot, chat_id, f"⏳ Consulting {_esc(args[0])}\\.\\.\\.")
+        try:
+            response = await consult_agent(role_key, question, session)
+            await _send(context.bot, chat_id, response)
+        except Exception as exc:
+            log.exception("consult_agent error")
+            await _send(context.bot, chat_id, f"❌ *Error:* {_esc(str(exc))}")
+
+    asyncio.create_task(_run())
 
 
 # ─── Message handler ──────────────────────────────────────────────────────────
@@ -248,6 +296,7 @@ def create_app(token: str) -> Application:
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("new",    cmd_new))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("ask",    cmd_ask))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))

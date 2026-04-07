@@ -24,6 +24,10 @@ def _require(key: str) -> str:
 def main() -> None:
     telegram_token = _require("TELEGRAM_BOT_TOKEN")
 
+    from core.storage import init_db
+    init_db()
+    log.info("Session DB initialised")
+
     log.info("Starting SE-Agents")
     log.info("Pipeline: BA(Haiku/Sonnet) → SA(Opus) → PM(Sonnet) → Tech Lead(Opus)")
     log.info("          → [USER APPROVAL]")
