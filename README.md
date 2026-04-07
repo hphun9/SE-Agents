@@ -39,6 +39,7 @@ You (Telegram)
 | **Parallel dev** | Backend Dev and Frontend Dev run concurrently after approval |
 | **Session persistence** | Active sessions are stored in MongoDB — server restarts don't lose work |
 | **Direct agent access** | `/ask <role> <message>` to consult any agent outside the pipeline |
+| **Bug fix flow** | `/fix <path> <error>` — Dev fixes it, QA runs tests, screenshot sent to Telegram |
 | **Max subscription** | Calls go through the `claude` CLI — no API billing, uses your Claude Max plan |
 
 ---
@@ -83,6 +84,8 @@ se-agents/
 │   ├── dev_backend.py       ← Backend Dev: spec → implementation guide + code
 │   ├── dev_frontend.py      ← Frontend Dev: spec → implementation guide + code
 │   ├── qa.py                ← QA: spec + impls → test plan + test code
+│   ├── fixer.py             ← Dev fix agent: read project → patch files
+│   ├── qa_runner.py         ← Run tests + render terminal output as PNG
 │   ├── consult.py           ← Direct /ask <role> consultation handler
 │   └── orchestrator.py      ← state machine, session store, pipeline runner
 │
@@ -102,49 +105,46 @@ se-agents/
 
 ## Setup
 
-### 1. Prerequisites
+### Option A — Docker (recommended)
+
+```bash
+# 1. Copy and fill in config
+cp .env.example .env
+
+# 2. Authenticate Claude Code on the HOST first (one-time)
+claude   # log in interactively, then exit
+
+# 3. Build and start everything
+PROJECTS_DIR=/path/to/your/projects docker-compose up -d
+```
+
+`docker-compose` starts both the bot and a MongoDB instance automatically.
+Your projects are mounted at `/projects` inside the container — use that path in `/fix`.
+
+---
+
+### Option B — Local
+
+#### Prerequisites
 
 - Python 3.11+
-- [Claude Code CLI](https://claude.ai/code) installed and logged in (`claude` available in PATH)
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- MongoDB running locally or a connection string (e.g. [MongoDB Atlas](https://www.mongodb.com/atlas))
+- [Claude Code CLI](https://claude.ai/code) installed and authenticated
+- MongoDB running locally or a [MongoDB Atlas](https://www.mongodb.com/atlas) URI
 
-> **Why Claude Code CLI?**
-> Agent calls go through `claude -p` instead of the Anthropic API directly.
-> This means they consume your **Claude Max subscription** — no extra API billing.
-
-### 2. Install dependencies
+> **Why Claude Code CLI?**  Agent calls go through `claude -p` — no API billing, uses your Claude Max subscription.
 
 ```bash
+# Install deps
 pip install -r requirements.txt
-```
 
-### 3. Start MongoDB
-
-```bash
-# Docker (quickest)
+# Start MongoDB (if local)
 docker run -d -p 27017:27017 mongo
 
-# Or use a local install / MongoDB Atlas URI in .env
-```
-
-### 4. Configure
-
-```bash
+# Configure
 cp .env.example .env
-```
+# Edit .env: TELEGRAM_BOT_TOKEN, MONGODB_URI, MONGODB_DB
 
-Edit `.env`:
-
-```env
-TELEGRAM_BOT_TOKEN=123456789:AAF...   # from @BotFather
-MONGODB_URI=mongodb://localhost:27017  # or Atlas URI
-MONGODB_DB=se_agents                  # database name
-```
-
-### 5. Run
-
-```bash
+# Run
 python main.py
 ```
 
@@ -161,6 +161,7 @@ python main.py
 | New project | Send `/new` or just send a new requirement after completion |
 | Check status | Send `/status` |
 | Consult an agent | `/ask <role> <question>` — works anytime, with or without active project |
+| Fix a bug | `/fix <project_path> <error description>` — Dev fixes, QA tests, screenshot sent |
 
 ### Direct agent consultation — `/ask`
 
@@ -218,6 +219,30 @@ QA:            [Delivers test plan + pytest/Playwright tests]
 
 Bot:  "🎉 All done!"
 ```
+
+### Bug fix flow — `/fix`
+
+```
+You:  /fix /projects/myapp Getting 401 on every POST /api/auth/login
+
+Bot:  🔍 Dev agent is analysing /projects/myapp...
+
+Bot:  🔧 Fix applied
+      Analysis: JWT secret was missing from .env — middleware rejected all tokens
+      Files changed:
+        • auth/middleware.py  (modify)
+        • config/settings.py  (modify)
+      Summary: Added JWT_SECRET env var lookup; defaulted to raise on missing
+
+      🧪 Running tests...
+
+Bot:  [sends PNG screenshot of terminal output]
+      ✓ All tests passed
+      Command: pytest tests/test_auth.py -v
+```
+
+The fix flow works on **any external project** — it doesn't need to be created through the pipeline.
+Just mount the project directory and pass its path.
 
 ---
 
