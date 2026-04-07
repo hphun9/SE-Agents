@@ -16,6 +16,7 @@ MODELS: dict[str, str] = {
     # BA — clarification questions are simple; BRD needs more reasoning
     "ba_clarify":     HAIKU,
     "ba_brd":         SONNET,
+    "ba_chat":        HAIKU,   # Secretary & consult routing (cheap + fast)
 
     # Planning phase — SA is the most complex (architecture decisions)
     "sa":             OPUS,

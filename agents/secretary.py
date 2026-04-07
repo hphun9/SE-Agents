@@ -81,7 +81,12 @@ The team can:
 • Answer technical questions instantly (BA, SA, PM, Tech Lead, Dev, Frontend, QA)
 • Fix bugs in existing code (/fix command)
 
-Hint at how to use the bot naturally without listing every command."""
+Hint at how to use the bot naturally without listing every command.
+
+IMPORTANT: Always respond in the same language the user writes in.
+If they write in Vietnamese → respond in Vietnamese.
+If they write in English → respond in English.
+Match their language exactly."""
 
 # ─── Role display metadata ────────────────────────────────────────────────────
 
