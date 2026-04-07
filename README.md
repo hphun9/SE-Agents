@@ -1,28 +1,26 @@
-# SE-Agents — AI Software Development Team via Telegram
+# SE-Agents v1.0.0 — AI Software Development Team
 
-> Describe a project in plain text. The AI team asks clarifying questions, produces formal documents, lets you approve the plan, then the dev team delivers implementation guides with real code — all delivered to your Telegram chat.
+> Describe a project in plain text. The AI team clarifies requirements, produces formal documents, lets you approve the plan, then the dev team writes real code to your disk — delivered across Telegram, Zalo, or your terminal.
 
 ---
 
-## Features
+## What's New in v1.0.0
 
 | Feature | Detail |
 |---------|--------|
-| **BA clarification loop** | Up to 4 rounds of Q&A before producing a BRD |
-| **Full pipeline** | BA → SA → PM → Tech Lead → Dev (parallel) → QA |
-| **Approval gate** | Review planning docs before dev team starts — approve or request changes |
-| **Direct agent consult** | `/ask <role> <question>` any time, with or without an active project |
-| **Bug fix flow** | `/fix <path> <error>` — Dev fixes it, QA runs tests, screenshot sent to Telegram |
-| **Session persistence** | MongoDB stores sessions — server restarts don't lose work |
-| **No API billing** | Calls go through `claude` CLI — uses your Claude Max subscription |
-| **Structured comms** | All inter-agent messages are typed JSON envelopes, never natural language |
+| **Multi-channel adapters** | Telegram, Zalo OA, and local CLI all work simultaneously from the same codebase |
+| **Workspace writer** | Agent output is written as real files to your project directory — not just chat messages |
+| **Git auto-commit** | Each agent stage commits to the project's git repo automatically |
+| **Autonomous / queue mode** | Queue multiple projects, auto-approve, and wake up to completed results |
+| **Overnight command** | `/overnight <requirement>` — queue with full auto-approve and default tech prefs |
+| **Crash recovery** | MongoDB checkpoints save pipeline state; failed projects can be retried |
 
 ---
 
 ## How It Works
 
 ```
-You (Telegram)
+You (Telegram / Zalo / CLI)
    │
    ▼  plain text requirement
 ┌──────────────────────────────────────────────────────────────┐
@@ -33,29 +31,50 @@ You (Telegram)
 └──────────────────────────────────────────────────────────────┘
    │
    ▼  📋 Approve or Request Changes? (inline keyboard)
-   │
+   │                    OR  🤖 auto-approved (autonomous mode)
    ▼  ✅ Approved
 ┌──────────────────────────────────────────────────────────────┐
-│  Backend Dev  ──► Implementation Guide + code       (Opus)   │
-│  Frontend Dev ──► Implementation Guide + code       (Sonnet) │  ← parallel
-│  QA           ──► Test Plan + test code             (Sonnet) │
+│  Backend Dev  ──► code + files written to disk      (Opus)   │
+│  Frontend Dev ──► code + files written to disk      (Sonnet) │  ← parallel
+│  QA           ──► test plan + test code             (Sonnet) │
 └──────────────────────────────────────────────────────────────┘
    │
-   ▼  All documents delivered to your Telegram chat
+   ▼  📁 Real project files on your machine + git commits
+   ▼  All documents delivered to your chat
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-/fix flow (independent of pipeline — works on any project)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/fix flow  (works on any project — independent of pipeline)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /fix /projects/myapp <error description>
-   │
    ▼  Haiku triages relevant files  (cheap)
-   ▼  Opus analyses + generates fix (precise)
-   ▼  Writes patched files to disk
+   ▼  Opus analyses + generates patch
+   ▼  Writes fixed files to disk
    ▼  Runs test command via subprocess
-   ▼  Renders terminal output as PNG
-   ▼  Sends screenshot to Telegram  📸
+   ▼  Renders terminal output as PNG  📸
+   ▼  Sends screenshot to Telegram / Zalo / CLI
 ```
+
+---
+
+## Architecture
+
+```
+Telegram ──┐
+  Zalo   ──┼──► adapters/    ──► Orchestrator ──► agents/
+   CLI   ──┘    (base.py)        (queue, state       (BA, SA, PM, TL
+                                  machine, auto)       Dev, QA, Fixer)
+                                       │
+                                       ▼
+                                 workspace/
+                                 (write files + git commit)
+                                       │
+                                       ▼
+                                  MongoDB
+                                 (sessions + checkpoints)
+```
+
+All adapters produce `IncomingMessage` and consume `OutgoingMessage`. The orchestrator never imports Telegram or Zalo — it only knows about the abstract adapter interface.
 
 ---
 
@@ -68,11 +87,13 @@ You (Telegram)
 | **Solution Architect** | `claude-opus-4-6` | Architecture, ADRs, tech-stack decisions |
 | **Project Manager** | `claude-sonnet-4-6` | Project plan, phases, risks, milestones |
 | **Tech Lead** | `claude-opus-4-6` | API design, data models, technical spec |
-| **Backend Dev** | `claude-opus-4-6` | Scaffold + real implementation code |
-| **Frontend Dev** | `claude-sonnet-4-6` | Components + real UI code |
+| **Backend Dev** | `claude-opus-4-6` | Scaffold + real implementation code → written to disk |
+| **Frontend Dev** | `claude-sonnet-4-6` | Components + real UI code → written to disk |
 | **QA Engineer** | `claude-sonnet-4-6` | Test plan, test cases, CI config |
-| **Fixer** — triage | `claude-haiku-4-5` | Identify relevant files cheaply |
-| **Fixer** — patch | `claude-opus-4-6` | Analyse bug, generate & apply fix |
+| **Fixer — triage** | `claude-haiku-4-5` | Identify relevant files cheaply |
+| **Fixer — patch** | `claude-opus-4-6` | Analyse bug, generate & apply fix |
+
+> All calls go through `claude -p` CLI — uses your **Claude Max subscription**, no API billing.
 
 ---
 
@@ -81,42 +102,48 @@ You (Telegram)
 ```
 se-agents/
 │
-├── main.py                   ← entry point
-├── config.py                 ← model assignments per task
+├── main.py                      ← async entry point; loads adapters from env
+├── config.py                    ← model assignments per task
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 ├── Dockerfile
 ├── docker-compose.yml
 │
+├── adapters/                    ← one file per chat platform
+│   ├── base.py                  ← ChatAdapter ABC + IncomingMessage / OutgoingMessage
+│   ├── telegram_adapter.py      ← python-telegram-bot v21
+│   ├── zalo_adapter.py          ← aiohttp webhook + Zalo OA API v3
+│   └── cli_adapter.py           ← local terminal (for dev/testing)
+│
+├── workspace/                   ← write agent output as real project files
+│   ├── writer.py                ← extract code blocks → files on disk
+│   └── git_integration.py       ← async git init + commit per agent stage
+│
 ├── core/
-│   ├── models.py             ← AgentMessage envelope, SessionState, dataclasses
-│   ├── claude.py             ← calls `claude -p` CLI (uses Max subscription)
-│   ├── storage.py            ← MongoDB session persistence (motor async)
-│   └── formatter.py          ← Telegram MarkdownV2 formatters per document type
+│   ├── models.py                ← AgentMessage, SessionState, QueuedProject
+│   ├── claude.py                ← calls `claude -p` CLI
+│   ├── storage.py               ← MongoDB session persistence (motor async)
+│   ├── checkpoint.py            ← pipeline crash recovery
+│   └── formatter.py             ← MarkdownV2 formatters per document type
 │
 ├── agents/
-│   ├── orchestrator.py       ← pipeline state machine + session store
-│   ├── ba.py                 ← BA: clarification loop → BRD
-│   ├── sa.py                 ← SA: BRD → Architecture Document
-│   ├── pm.py                 ← PM: BRD + Arch → Project Plan
-│   ├── tech_lead.py          ← Tech Lead: → Technical Specification
-│   ├── dev_backend.py        ← Backend Dev: → implementation guide + code
-│   ├── dev_frontend.py       ← Frontend Dev: → implementation guide + code
-│   ├── qa.py                 ← QA: → test plan + test code
-│   ├── fixer.py              ← /fix: triage files, generate & apply patch
-│   ├── qa_runner.py          ← run tests, capture output, render PNG screenshot
-│   └── consult.py            ← /ask: direct per-role consultation
+│   ├── orchestrator.py          ← Orchestrator class: adapter-agnostic state machine
+│   ├── ba.py                    ← BA: clarification loop → BRD
+│   ├── sa.py                    ← SA: BRD → Architecture Document
+│   ├── pm.py                    ← PM: BRD + Arch → Project Plan
+│   ├── tech_lead.py             ← Tech Lead: → Technical Specification
+│   ├── dev_backend.py           ← Backend Dev: → implementation guide + code
+│   ├── dev_frontend.py          ← Frontend Dev: → implementation guide + code
+│   ├── qa.py                    ← QA: → test plan + test code
+│   ├── fixer.py                 ← /fix: triage files, generate & apply patch
+│   ├── qa_runner.py             ← run tests, capture output, render PNG
+│   └── consult.py               ← /ask: direct per-role consultation
 │
 ├── bot/
-│   └── telegram.py           ← python-telegram-bot v21, all command handlers
+│   └── telegram.py              ← DEPRECATED (v1.0.0) — use adapters/ instead
 │
-├── roles/                    ← 18 agent persona definitions (Claude Code / Cursor)
-│   ├── ba-business-analyst.md
-│   ├── sa-solution-architect.md
-│   └── ...
-│
-└── src/                      ← legacy TypeScript prototype (reference only)
+└── roles/                       ← 18 agent persona definitions (Claude Code / Cursor)
 ```
 
 ---
@@ -126,11 +153,13 @@ se-agents/
 | Layer | Technology |
 |-------|------------|
 | Language | Python 3.12 |
-| AI | Claude Code CLI (`claude -p`) — Max subscription, no API billing |
+| AI | Claude Code CLI (`claude -p`) — Max subscription |
 | Telegram | python-telegram-bot v21 (async) |
-| Database | MongoDB via motor (async driver) |
-| Screenshots | Pillow — terminal output rendered as PNG |
-| Async | asyncio + `asyncio.gather()` for parallel dev agents |
+| Zalo | aiohttp webhook server + Zalo OA API v3 |
+| Database | MongoDB via motor (async) |
+| Screenshots | Pillow — terminal output as PNG |
+| Async | asyncio + `asyncio.gather()` for parallel agents |
+| Workspace | pathlib + subprocess git |
 | Container | Docker + Docker Compose |
 
 ---
@@ -139,50 +168,44 @@ se-agents/
 
 ### Option A — Docker (recommended)
 
-**Prerequisites:** Docker, Docker Compose, a Claude Max subscription, a Telegram bot token.
-
 ```bash
 # 1. Clone and configure
 git clone https://github.com/hphun9/SE-Agents.git
 cd SE-Agents
 cp .env.example .env
-# Edit .env — fill in TELEGRAM_BOT_TOKEN and PROJECTS_DIR
+# Edit .env — at minimum fill in TELEGRAM_BOT_TOKEN
 
-# 2. Authenticate Claude Code on the HOST machine (one-time)
-#    This saves auth tokens to ~/.claude which the container mounts read-only
-claude
+# 2. Authenticate Claude Code on the HOST (one-time)
+claude   # log in interactively, then Ctrl+C
 
-# 3. Start bot + MongoDB
+# 3. Start everything
 PROJECTS_DIR=/absolute/path/to/your/projects docker-compose up -d
 
-# 4. View logs
+# 4. Logs
 docker-compose logs -f bot
 ```
 
-Your projects are mounted at `/projects` inside the container.
-Use container paths in `/fix`: `/fix /projects/myapp Fix the login error`.
+Projects are mounted at `/projects` inside the container.
+Use `/fix /projects/myapp ...` or `/overnight build a todo app at /projects/todo`.
 
 ---
 
-### Option B — Local (development)
-
-**Prerequisites:** Python 3.11+, Node.js, MongoDB.
+### Option B — Local
 
 ```bash
-# Install Python deps
+# Install deps
 pip install -r requirements.txt
 
 # Install and authenticate Claude Code CLI
 npm install -g @anthropic-ai/claude-code
 claude   # log in
 
-# Start MongoDB
+# MongoDB
 docker run -d -p 27017:27017 mongo
-# or use MongoDB Atlas — set MONGODB_URI in .env
 
 # Configure
 cp .env.example .env
-# Fill in: TELEGRAM_BOT_TOKEN, MONGODB_URI, MONGODB_DB
+# Fill in TELEGRAM_BOT_TOKEN (and optionally ZALO_OA_ACCESS_TOKEN or ENABLE_CLI=true)
 
 # Run
 python main.py
@@ -194,10 +217,16 @@ python main.py
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | ✅ | — | From [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_BOT_TOKEN` | one of these three | — | From [@BotFather](https://t.me/BotFather) |
+| `ZALO_OA_ACCESS_TOKEN` | one of these three | — | From Zalo OA dashboard |
+| `ENABLE_CLI` | one of these three | `false` | Set `true` for terminal adapter |
+| `ZALO_WEBHOOK_PORT` | | `8080` | Port for Zalo webhook server |
+| `ZALO_WEBHOOK_SECRET` | | — | HMAC secret for Zalo payload verification |
 | `MONGODB_URI` | ✅ | `mongodb://localhost:27017` | MongoDB connection string |
 | `MONGODB_DB` | | `se_agents` | Database name |
-| `PROJECTS_DIR` | | `/tmp/projects` | Host path mounted as `/projects` in Docker |
+| `PROJECTS_DIR` | | `/tmp/projects` | Directory for workspace file output |
+
+At least one of `TELEGRAM_BOT_TOKEN`, `ZALO_OA_ACCESS_TOKEN`, or `ENABLE_CLI=true` must be set.
 
 ---
 
@@ -205,22 +234,27 @@ python main.py
 
 | Command | Description |
 |---------|-------------|
-| _(any text)_ | Start a new project with that requirement |
-| `/new` | Clear current session and start fresh |
-| `/status` | Show current pipeline state |
-| `/ask <role> <question>` | Consult a specific agent directly |
-| `/fix <path> <error>` | Dev fixes a bug, QA tests it, screenshot sent |
-| `/help` | Show all commands and available roles |
+| _(any text)_ | Start a new project interactively |
+| `/new` | Clear current session |
+| `/status` | Show pipeline state, queue size, and mode |
+| `/ask <role> <question>` | Consult an agent directly |
+| `/fix <path> <error>` | Dev fixes a bug → QA tests → screenshot |
+| `/queue <requirement>` | Queue a project |
+| `/queue list` | Show the queue |
+| `/queue clear` | Clear the queue |
+| `/auto on\|off` | Toggle autonomous mode (auto-approve all) |
+| `/overnight <requirement>` | Queue + auto-approve + default tech prefs |
+| `/help` | All commands + available `/ask` roles |
 
-### `/ask` — direct agent consultation
+---
 
-Address any agent directly, with or without an active project. If a session exists the agent automatically receives relevant documents as context.
+## `/ask` — Direct Agent Consultation
 
 ```
 /ask ba    What requirements am I missing?
-/ask sa    Should I use microservices or a monolith for 10k users/day?
+/ask sa    Microservices vs monolith for 10k users/day?
 /ask lead  Review this API design: [paste design]
-/ask dev   Fix this 401 error — here's my middleware: [paste code]
+/ask dev   Fix this 401 error: [paste code]
 /ask qa    Write unit tests for the login flow
 ```
 
@@ -236,52 +270,106 @@ Address any agent directly, with or without an active project. If a session exis
 | `frontend`, `fe`, `ui` | Frontend Developer | Sonnet |
 | `qa`, `test` | QA Engineer | Sonnet |
 
-### `/fix` — bug fix with QA screenshot
+If a session is active the agent automatically receives the relevant docs (BRD, tech spec, etc.) as context.
 
-Works on **any project** on your filesystem — no pipeline session required.
+---
+
+## Autonomous Mode
+
+Enable auto-approve so the full pipeline runs without waiting for you:
 
 ```
-/fix /projects/myapp Getting 401 on every POST /api/auth/login
+/auto on
+
+I want to build a SaaS invoicing app   ← starts immediately, no approval prompt
 ```
 
-Flow:
-1. **Haiku** triages which files are relevant (cheap)
-2. **Opus** reads files, analyses the bug, generates a patch
-3. Bot writes the patched files to disk
-4. Runs the test command via subprocess
-5. Renders terminal output as a PNG and sends it to Telegram
+Or queue projects to run sequentially:
+
+```
+/queue Build a REST API for a bookshop
+/queue Build an admin dashboard for the bookshop
+/queue list    → 2 projects pending
+```
+
+Or use `/overnight` for fully unattended runs:
+
+```
+/overnight Build a task management SaaS with React + FastAPI
+```
+
+All three projects run back-to-back. When the queue finishes you get a summary:
+
+```
+🌅 Queue complete — 3/3 succeeded
+✅ REST API for a bookshop
+✅ Admin dashboard for the bookshop
+✅ Task management SaaS
+```
+
+---
+
+## Workspace Output
+
+After dev agents finish, real files are written to `PROJECTS_DIR/<project-name>/`:
+
+```
+/projects/task-management-saas/
+├── docs/
+│   ├── 01-business-requirements.md
+│   ├── 02-architecture.md
+│   ├── 03-project-plan.md
+│   ├── 04-technical-specification.md
+│   ├── 05-backend-implementation.md
+│   ├── 06-frontend-implementation.md
+│   └── 07-test-plan.md
+├── src/
+│   ├── api/
+│   │   ├── main.py
+│   │   └── routes/
+│   └── frontend/
+│       └── src/
+├── tests/
+└── se-agents-manifest.json
+```
+
+Each stage also creates a git commit:
+
+```
+[SE-Agents/dev] 12 files written
+```
 
 ---
 
 ## Example Flows
 
-### Full pipeline
+### Interactive pipeline
 
 ```
 You:   "Build a SaaS task manager for small dev teams"
 
 BA:    Round 1 — clarifying:
          1. Web only or mobile too?
-         2. Real-time or async collaboration?
-         3. Any integrations? (GitHub, Slack…)
+         2. Real-time or async?
+         3. Integrations? (GitHub, Slack…)
 
 You:   "Web only. Real-time. GitHub + Slack."
 
-BA:    ✅ Requirements confirmed  →  [BRD delivered]
-SA:    [Architecture Document delivered]
-PM:    [Project Plan delivered]
-TL:    [Technical Specification delivered]
+BA:    ✅ Requirements confirmed  →  [BRD]
+SA:    [Architecture Document]
+PM:    [Project Plan]
+TL:    [Technical Specification]
 
 Bot:   📋 Planning complete — approve or request changes?
        [✅ Approve]   [📝 Request Changes]
 
 You:   ✅ Approve
 
-Dev:   Backend guide + FastAPI code       ← parallel
-Dev:   Frontend guide + React code        ← parallel
-QA:    Test plan + pytest/Playwright      ← after both devs finish
+Dev:   Backend guide + FastAPI code → written to /projects/task-manager/
+Dev:   Frontend guide + React code  → written to /projects/task-manager/
+QA:    Test plan + pytest tests     → written to /projects/task-manager/
 
-Bot:   🎉 All done!
+Bot:   🎉 All done! 📁 /projects/task-manager
 ```
 
 ### Bug fix
@@ -292,23 +380,32 @@ You:   /fix /projects/myapp Getting 401 on every POST /api/auth/login
 Bot:   🔍 Dev agent is analysing /projects/myapp...
 
 Bot:   🔧 Fix applied
-         Analysis: JWT secret missing from config — middleware rejected all tokens
          Files changed:
            • auth/middleware.py  (modify)
            • config/settings.py  (modify)
-         Summary: Added JWT_SECRET env var read; raises on missing value
 
        🧪 Running tests...
 
 Bot:   [PNG screenshot — dark terminal, green ✓ PASSED]
-       ✓ All tests passed  |  pytest tests/test_auth.py -v
+```
+
+### Overnight / autonomous
+
+```
+/auto on
+/overnight Build a REST bookshop API with FastAPI + PostgreSQL
+/overnight Build a React admin dashboard for the bookshop API
+
+→ Both projects run while you sleep.
+→ Files appear in /projects/ with git history.
+→ You receive a summary in the morning.
 ```
 
 ---
 
 ## Inter-Agent Message Format
 
-All agent-to-agent communication uses a typed JSON envelope — no natural language between agents:
+All agent-to-agent communication uses typed JSON envelopes — no natural language between agents:
 
 ```json
 {
@@ -327,28 +424,42 @@ All agent-to-agent communication uses a typed JSON envelope — no natural langu
 
 ---
 
+## Adding a New Chat Channel
+
+1. Create `adapters/myplatform_adapter.py` implementing `ChatAdapter`
+2. Convert platform events → `IncomingMessage` in `start()`
+3. Convert `OutgoingMessage` → platform API calls in `send()`
+4. Add the env var check in `main.py`
+
+The orchestrator and all agents need zero changes.
+
+---
+
 ## Troubleshooting
 
 **`claude: command not found`**
-Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`, then run `claude` to authenticate.
+Install: `npm install -g @anthropic-ai/claude-code`, then run `claude` to authenticate.
 
-**Bot doesn't respond after restart**
-Sessions are persisted in MongoDB. Check that `MONGODB_URI` is reachable: `python -c "import motor"`.
+**No adapters configured**
+Set at least one of: `TELEGRAM_BOT_TOKEN`, `ZALO_OA_ACCESS_TOKEN`, or `ENABLE_CLI=true`.
 
 **`/fix` says project not found**
-When using Docker, paths must be inside the container. Mount your project dir via `PROJECTS_DIR` and use `/projects/your-app` as the path.
+In Docker, paths must be inside the container. Mount via `PROJECTS_DIR` and use `/projects/myapp`.
 
 **Screenshot font is pixelated**
-The Dockerfile installs DejaVu fonts. If running locally, install `fonts-dejavu-core` (Linux) or the font will fall back to PIL's default bitmap font.
+The Dockerfile installs DejaVu fonts. Running locally: install `fonts-dejavu-core` (Linux) or the fallback bitmap font is used.
 
-**Telegram `Bad Request: can't parse entities`**
-The bot falls back to plain text automatically on MarkdownV2 parse errors. If a document looks garbled, this is the fallback kicking in — the content is still correct.
+**Zalo messages not received**
+Your webhook URL must be publicly reachable and registered in the Zalo OA dashboard. Use `ngrok` for local development.
+
+**Session lost after restart**
+Sessions are persisted in MongoDB. Verify `MONGODB_URI` is reachable: `docker-compose ps mongo`.
 
 ---
 
 ## Agent Persona Files
 
-The `roles/` folder contains detailed persona definitions you can load directly into Claude Code CLI or Cursor as standalone agents:
+The `roles/` folder contains 18 detailed persona definitions for use as standalone agents in Claude Code CLI or Cursor:
 
 | File | Role |
 |------|------|
