@@ -162,7 +162,13 @@ async def consult_agent(
 
     messages.append({"role": "user", "content": question})
 
-    return await call_claude(role["model"], role["system"], messages)
+    # Respond in the user's language automatically
+    system = role["system"] + (
+        "\n\nIMPORTANT: Always respond in the same language the user writes in. "
+        "If they write in Vietnamese, respond in Vietnamese. "
+        "If they write in English, respond in English. Match their language exactly."
+    )
+    return await call_claude(role["model"], system, messages)
 
 
 def list_roles() -> str:

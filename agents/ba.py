@@ -21,6 +21,7 @@ RULES:
 - If critical information is missing, ask the most important clarifying questions (max 5 per round).
 - After sufficient clarification (1-3 rounds), produce the BRD.
 - After round {MAX_BA_ROUNDS}, produce the BRD regardless using reasonable assumptions.
+- ALWAYS write your "analysis", "questions", and "context" fields in the same language the user writes in. If they write in Vietnamese, those fields must be in Vietnamese. If English, use English.
 
 OUTPUT: Respond with ONLY valid JSON — no prose, no markdown fences.
 
