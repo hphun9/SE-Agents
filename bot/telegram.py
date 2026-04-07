@@ -74,7 +74,8 @@ def _make_callbacks(bot, chat_id: int):
 
     async def on_clarify(questions: list[str], analysis: str, iteration: int) -> None:
         from core.formatter import fmt_clarification
-        await _send(bot, chat_id, fmt_clarification(analysis, questions, iteration))
+        for chunk in fmt_clarification(analysis, questions, iteration):
+            await _send(bot, chat_id, chunk)
 
     async def on_document(doc_type: str, chunks: list[str]) -> None:
         await _send(bot, chat_id, f"\n📄 *{_esc(doc_type)}*")

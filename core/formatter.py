@@ -32,7 +32,7 @@ def esc(text: str) -> str:
 
 # ─── Per-document formatters ─────────────────────────────────────────────────
 
-def fmt_clarification(analysis: str, questions: list[str], iteration: int) -> str:
+def fmt_clarification(analysis: str, questions: list[str], iteration: int) -> list[str]:
     lines = [
         f"🔍 *Requirements Analysis — Round {iteration}*",
         "",
@@ -44,7 +44,7 @@ def fmt_clarification(analysis: str, questions: list[str], iteration: int) -> st
     for i, q in enumerate(questions, 1):
         lines.append(f"{i}\\. {esc(q)}")
     lines += ["", "_Please answer all questions in one message\\._"]
-    return "\n".join(lines)
+    return split_message("\n".join(lines))
 
 
 def fmt_brd(brd: dict) -> list[str]:
