@@ -37,7 +37,9 @@ You (Telegram)
 | **Model tiering** | Haiku → fast Q&A · Sonnet → structured docs · Opus → complex reasoning & code |
 | **Approval gate** | Planning phase pauses; you review and either approve or provide feedback |
 | **Parallel dev** | Backend Dev and Frontend Dev run concurrently after approval |
-| **Async Python** | `asyncio` + `AsyncAnthropic` — non-blocking pipeline |
+| **Session persistence** | Active sessions are stored in MongoDB — server restarts don't lose work |
+| **Direct agent access** | `/ask <role> <message>` to consult any agent outside the pipeline |
+| **Max subscription** | Calls go through the `claude` CLI — no API billing, uses your Claude Max plan |
 
 ---
 
@@ -65,10 +67,12 @@ se-agents/
 ├── config.py                ← model assignments & constants
 ├── requirements.txt
 ├── .env.example
+├── .gitignore
 │
 ├── core/
 │   ├── models.py            ← AgentMessage envelope, SessionState, dataclasses
-│   ├── claude.py            ← async Claude API wrapper (streaming)
+│   ├── claude.py            ← Claude wrapper — routes calls through `claude` CLI
+│   ├── storage.py           ← MongoDB session persistence (motor async)
 │   └── formatter.py         ← Telegram MarkdownV2 formatters per document type
 │
 ├── agents/
@@ -79,10 +83,16 @@ se-agents/
 │   ├── dev_backend.py       ← Backend Dev: spec → implementation guide + code
 │   ├── dev_frontend.py      ← Frontend Dev: spec → implementation guide + code
 │   ├── qa.py                ← QA: spec + impls → test plan + test code
+│   ├── consult.py           ← Direct /ask <role> consultation handler
 │   └── orchestrator.py      ← state machine, session store, pipeline runner
 │
 ├── bot/
 │   └── telegram.py          ← python-telegram-bot v21, inline keyboard approval
+│
+├── roles/                   ← Agent persona definitions (Claude Code / Cursor)
+│   ├── ba-business-analyst.md
+│   ├── sa-solution-architect.md
+│   └── ...                  ← 18 role files total
 │
 └── src/                     ← legacy TypeScript prototype (reference only)
     └── ...
@@ -95,25 +105,44 @@ se-agents/
 ### 1. Prerequisites
 
 - Python 3.11+
+- [Claude Code CLI](https://claude.ai/code) installed and logged in (`claude` available in PATH)
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- An [Anthropic API key](https://console.anthropic.com)
+- MongoDB running locally or a connection string (e.g. [MongoDB Atlas](https://www.mongodb.com/atlas))
 
-### 2. Install
+> **Why Claude Code CLI?**
+> Agent calls go through `claude -p` instead of the Anthropic API directly.
+> This means they consume your **Claude Max subscription** — no extra API billing.
+
+### 2. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure
+### 3. Start MongoDB
+
+```bash
+# Docker (quickest)
+docker run -d -p 27017:27017 mongo
+
+# Or use a local install / MongoDB Atlas URI in .env
+```
+
+### 4. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in:
-#   ANTHROPIC_API_KEY=sk-ant-...
-#   TELEGRAM_BOT_TOKEN=123456789:AAF...
 ```
 
-### 4. Run
+Edit `.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=123456789:AAF...   # from @BotFather
+MONGODB_URI=mongodb://localhost:27017  # or Atlas URI
+MONGODB_DB=se_agents                  # database name
+```
+
+### 5. Run
 
 ```bash
 python main.py
@@ -131,8 +160,35 @@ python main.py
 | Request changes | Tap **📝 Request Changes**, then describe what to change |
 | New project | Send `/new` or just send a new requirement after completion |
 | Check status | Send `/status` |
+| Consult an agent | `/ask <role> <question>` — works anytime, with or without active project |
 
-### Example flow
+### Direct agent consultation — `/ask`
+
+You can address any agent directly outside the pipeline:
+
+```
+/ask ba   What requirements am I missing from this spec?
+/ask sa   Should I use microservices or a monolith for 10k users/day?
+/ask dev  Fix this 401 error — here's my auth middleware: [code]
+/ask qa   Write unit tests for the login flow
+/ask lead Review this API design
+```
+
+**Available roles:**
+
+| Alias | Agent | Model |
+|-------|-------|-------|
+| `ba`, `business` | Business Analyst | Sonnet |
+| `sa`, `architect` | Solution Architect | Opus |
+| `pm`, `manager` | Project Manager | Sonnet |
+| `lead`, `tl` | Tech Lead | Opus |
+| `dev`, `backend`, `be` | Backend Developer | Opus |
+| `frontend`, `fe`, `ui` | Frontend Developer | Sonnet |
+| `qa`, `test` | QA Engineer | Sonnet |
+
+If you have an active project, the agent automatically receives relevant documents (BRD, tech spec, etc.) as context.
+
+### Example pipeline flow
 
 ```
 You:  "I want to build a SaaS task management app for small dev teams"
@@ -167,7 +223,7 @@ Bot:  "🎉 All done!"
 
 ## Inter-Agent Message Format
 
-All agent-to-agent messages use a structured JSON envelope:
+All agent-to-agent messages use a structured JSON envelope — no natural language between agents:
 
 ```json
 {
@@ -183,8 +239,6 @@ All agent-to-agent messages use a structured JSON envelope:
   }
 }
 ```
-
-No natural language between agents — only in Telegram-facing output.
 
 ---
 
