@@ -36,6 +36,7 @@ from agents.qa import qa_generate
 from agents.fixer import analyze_and_fix
 from agents.qa_runner import run_tests
 from agents.consult import consult_agent, resolve_role, list_roles
+from agents.secretary import secretary_dispatch, team_roster
 from core.knowledge_base import search_similar, save_solution, get_stats, search_for_user
 from config import MAX_BA_ROUNDS
 from workspace.writer import WorkspaceWriter
@@ -158,6 +159,8 @@ class Orchestrator:
             await self._cmd_help(plt, cid)
         elif text.startswith("/ask "):
             asyncio.create_task(self._cmd_ask(plt, cid, text[5:].strip()))
+        elif text.lower().startswith("/s ") or text.lower() == "/s":
+            asyncio.create_task(self._cmd_secretary(plt, cid, text.split(None, 1)[1].strip() if " " in text else ""))
         elif text.startswith("/fix "):
             asyncio.create_task(self._cmd_fix(plt, cid, text[5:].strip()))
         elif text.startswith("/queue"):
@@ -219,10 +222,11 @@ class Orchestrator:
         await self._send(plt, cid,
             "📖 *Commands*\n\n"
             "*(any text)* — start a new project\n"
+            "/s \\<message\\> — 🤖 secretary: chat naturally, auto\\-routes to the right agent\n"
+            "/ask \\<role\\> \\<question\\> — consult a specific agent directly\n"
+            "/fix \\<path\\> \\<error\\> — dev fixes bug \\+ QA screenshot\n"
             "/new — clear current session\n"
             "/status — pipeline status\n"
-            "/ask \\<role\\> \\<question\\> — consult an agent\n"
-            "/fix \\<path\\> \\<error\\> — dev fixes bug \\+ QA screenshot\n"
             "/queue \\<requirement\\> — queue a project\n"
             "/queue list — show queue\n"
             "/queue clear — clear queue\n"
@@ -251,6 +255,42 @@ class Orchestrator:
         except Exception as exc:
             log.exception("consult_agent error")
             await self._send(plt, cid, f"❌ Error: {_esc(str(exc))}")
+
+    async def _cmd_secretary(self, plt: str, cid: str, message: str) -> None:
+        """
+        Natural-language dispatcher — chat freely and the secretary
+        automatically routes to the right specialist.
+        """
+        if not message:
+            await self._send(plt, cid,
+                "👋 *Hi\\! I'm your Secretary\\.* Just tell me what you need in plain language "
+                "and I'll connect you to the right team member\\.\n\n"
+                f"*The team:*\n{team_roster()}\n\n"
+                "Example: `/s how should I design my auth service?`"
+            )
+            return
+
+        await self._send(plt, cid, "🤖 *Secretary is thinking\\.\\.\\.*")
+        session = await self._get_session(cid)
+        try:
+            result = await secretary_dispatch(message, session)
+        except Exception as exc:
+            log.exception("secretary error")
+            await self._send(plt, cid, f"❌ Secretary error: {_esc(str(exc))}")
+            return
+
+        if result["routed_to"] == "secretary":
+            # Direct answer — no routing needed
+            header = "🤖 *Secretary*"
+        else:
+            # Routed to a specialist — show who answered
+            header = (
+                f"{result['emoji']} *{_esc(result['role_name'])}* "
+                f"\\(via Secretary\\)"
+            )
+
+        await self._send(plt, cid, header)
+        await self._send(plt, cid, result["response"])
 
     async def _cmd_fix(self, plt: str, cid: str, args: str) -> None:
         parts = args.split(None, 1)

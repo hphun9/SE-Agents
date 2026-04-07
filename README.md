@@ -15,6 +15,7 @@
 | **Overnight command** | `/overnight <requirement>` — queue with full auto-approve and default tech prefs |
 | **Crash recovery** | MongoDB checkpoints save pipeline state; failed projects can be retried |
 | **Self-learning KB** | Every `/fix` run saves error + root cause + solution to MongoDB; future fixes search past solutions and never start from zero |
+| **Secretary agent** | `/s <anything>` — chat naturally; Haiku classifies intent and auto-routes to the right specialist, no need to know role names |
 
 ---
 
@@ -140,7 +141,8 @@ se-agents/
 │   ├── qa.py                    ← QA: → test plan + test code
 │   ├── fixer.py                 ← /fix: triage files, generate & apply patch
 │   ├── qa_runner.py             ← run tests, capture output, render PNG
-│   └── consult.py               ← /ask: direct per-role consultation
+│   ├── consult.py               ← /ask: direct per-role consultation
+│   └── secretary.py             ← /s: natural-language dispatcher (Haiku intent classifier)
 │
 ├── bot/
 │   └── telegram.py              ← DEPRECATED (v1.0.0) — use adapters/ instead
@@ -246,6 +248,7 @@ At least one of `TELEGRAM_BOT_TOKEN`, `ZALO_OA_ACCESS_TOKEN`, or `ENABLE_CLI=tru
 | `/queue clear` | Clear the queue |
 | `/auto on\|off` | Toggle autonomous mode (auto-approve all) |
 | `/overnight <requirement>` | Queue + auto-approve + default tech prefs |
+| `/s <message>` | Secretary: chat naturally — auto-routes to the right specialist |
 | `/kb stats` | Knowledge base statistics (total, success rate, top error types) |
 | `/kb search <query>` | Search past solutions in the knowledge base |
 | `/help` | All commands + available `/ask` roles |
@@ -342,6 +345,62 @@ Each stage also creates a git commit:
 ```
 [SE-Agents/dev] 12 files written
 ```
+
+---
+
+## Secretary — Natural-Language Smart Dispatcher
+
+Don't know which agent to ask? Just use `/s` and chat naturally. The Secretary uses Claude Haiku to classify your intent and automatically routes to the right specialist — no need to memorise role names or commands.
+
+```
+/s I need help choosing between PostgreSQL and MongoDB
+→ 🏗️ Solution Architect (via Secretary)
+   [full architecture advice]
+
+/s how do I write async unit tests in Python?
+→ 🧪 QA Engineer (via Secretary)
+   [test strategy + code examples]
+
+/s can you review my REST API design?
+→ ⚙️ Tech Lead (via Secretary)
+   [code review + recommendations]
+
+/s who handles Docker and CI/CD stuff?
+→ 🤖 Secretary
+   "That's the DevOps domain — use /ask devops <question>"
+
+/s
+→ 🤖 Secretary
+   [shows full team roster]
+```
+
+### How routing works
+
+```
+User: /s <anything>
+        │
+        ├─► Haiku classifies intent in < 1 second
+        │     → picks: ba | sa | pm | lead | dev | frontend | qa | null
+        │
+        ├─► if specialist found:
+        │     call consult_agent(role, message, session_context)
+        │     label response with specialist name + emoji
+        │
+        └─► if null (meta / greeting):
+              Secretary answers directly from team knowledge
+```
+
+### Team roster
+
+| Command | Specialist | Handles |
+|---------|-----------|---------|
+| `/ask ba` | 🔍 Business Analyst | requirements, user stories, scope |
+| `/ask sa` | 🏗️ Solution Architect | system design, tech stack, architecture |
+| `/ask pm` | 📅 Project Manager | timelines, milestones, risk |
+| `/ask lead` | ⚙️ Tech Lead | code review, API design, standards |
+| `/ask dev` | 🔧 Backend Developer | APIs, databases, server-side code |
+| `/ask frontend` | 🎨 Frontend Developer | UI, React/Vue, CSS, UX |
+| `/ask qa` | 🧪 QA Engineer | testing strategy, test cases, automation |
 
 ---
 
