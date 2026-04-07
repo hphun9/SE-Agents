@@ -4,11 +4,10 @@ services:
     build: .
     restart: unless-stopped
     env_file: .env
+    ports:
+      - "${ZALO_WEBHOOK_PORT:-8080}:8080"
     volumes:
-      # Claude Code auth — run `claude` interactively on the host first
       - ${HOME}/.claude:/root/.claude:ro
-      # Mount local projects so /fix can access them
-      # Usage: /fix /projects/my-app Fix the login error
       - ${PROJECTS_DIR:-/tmp/projects}:/projects
     depends_on:
       - mongo
@@ -18,7 +17,6 @@ services:
     restart: unless-stopped
     volumes:
       - mongo_data:/data/db
-    # Expose only if you need external access (comment out in prod)
     ports:
       - "127.0.0.1:27017:27017"
 
