@@ -26,6 +26,10 @@ MODELS: dict[str, str] = {
     "dev_backend":    OPUS,
     "dev_frontend":   SONNET,
     "qa":             SONNET,
+
+    # Fix flow — Opus for analysis + fix generation, Haiku for file triage
+    "fixer":          OPUS,
+    "fixer_triage":   HAIKU,
 }
 
 # BA clarification limits

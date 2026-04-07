@@ -29,6 +29,8 @@ from agents.orchestrator import (
     handle_change_feedback,
 )
 from agents.consult import consult_agent, resolve_role, list_roles
+from agents.fixer import analyze_and_fix
+from agents.qa_runner import run_tests
 from core.models import SessionState
 from core.formatter import split_message
 
@@ -165,6 +167,81 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_fix(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fix a bug in an external project.
+
+    Usage: /fix <project_path> <error description>
+    Example: /fix /projects/myapp Getting 401 on every POST /api/auth/login
+    """
+    chat_id = update.effective_chat.id
+    args    = context.args or []
+
+    if len(args) < 2:
+        await _send(
+            context.bot, chat_id,
+            "Usage: `/fix <project\\_path> <error description>`\n\n"
+            "Example:\n`/fix /projects/myapp Getting 401 on POST /api/auth`\n\n"
+            "The Dev agent will read the project, apply a fix, "
+            "then QA will run tests and send you a screenshot\\.",
+        )
+        return
+
+    project_path     = args[0]
+    error_description = " ".join(args[1:])
+
+    async def _run() -> None:
+        await _send(context.bot, chat_id,
+                    f"🔍 *Dev agent is analysing* `{_esc(project_path)}`\\.\\.\\.")
+        try:
+            fix = await analyze_and_fix(project_path, error_description)
+        except Exception as exc:
+            log.exception("fixer error")
+            await _send(context.bot, chat_id, f"❌ *Fixer error:* {_esc(str(exc))}")
+            return
+
+        # Report the fix
+        changed = "\n".join(
+            f"  • `{_esc(f['path'])}` \\({_esc(f['action'])}\\)"
+            for f in fix["files_changed"]
+        ) or "  _no files changed_"
+
+        await _send(
+            context.bot, chat_id,
+            f"🔧 *Fix applied*\n\n"
+            f"*Analysis:* {_esc(fix['analysis'])}\n\n"
+            f"*Files changed:*\n{changed}\n\n"
+            f"*Summary:* {_esc(fix['diff_summary'])}\n\n"
+            f"🧪 Running tests\\.\\.\\.",
+        )
+
+        # QA: run tests + capture screenshot
+        try:
+            result = await run_tests(fix["project_path"], fix["test_command"])
+        except Exception as exc:
+            log.exception("qa_runner error")
+            await _send(context.bot, chat_id, f"❌ *QA error:* {_esc(str(exc))}")
+            return
+
+        status = "✅ All tests passed" if result["passed"] else "❌ Tests failed"
+        caption = (
+            f"{status}\n"
+            f"Command: {fix['test_command'] or 'n/a'}"
+        )
+
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=result["screenshot"],
+                caption=caption,
+            )
+        except Exception:
+            # Fallback: send output as plain text
+            await _send(context.bot, chat_id,
+                        f"{_esc(status)}\n\n```\n{_esc(result['output'][:3000])}\n```")
+
+    asyncio.create_task(_run())
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _send(
         context.bot, update.effective_chat.id,
@@ -173,6 +250,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/new — Start fresh project\n"
         "/status — Pipeline status\n"
         "/ask \\<role\\> \\<message\\> — Consult a specific agent directly\n"
+        "/fix \\<path\\> \\<error\\> — Dev fixes a bug, QA tests \\+ sends screenshot\n"
         "/help — This message\n\n"
         "Just send your requirement as a plain message to begin\\!\n\n"
         f"*Available roles for /ask:*\n{list_roles()}",
@@ -297,6 +375,7 @@ def create_app(token: str) -> Application:
     app.add_handler(CommandHandler("new",    cmd_new))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("ask",    cmd_ask))
+    app.add_handler(CommandHandler("fix",    cmd_fix))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))

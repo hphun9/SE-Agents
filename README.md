@@ -1,6 +1,21 @@
 # SE-Agents — AI Software Development Team via Telegram
 
-> You describe a project. The team asks clarifying questions, you approve the plan, and the dev team delivers implementation guides — all through Telegram.
+> Describe a project in plain text. The AI team asks clarifying questions, produces formal documents, lets you approve the plan, then the dev team delivers implementation guides with real code — all delivered to your Telegram chat.
+
+---
+
+## Features
+
+| Feature | Detail |
+|---------|--------|
+| **BA clarification loop** | Up to 4 rounds of Q&A before producing a BRD |
+| **Full pipeline** | BA → SA → PM → Tech Lead → Dev (parallel) → QA |
+| **Approval gate** | Review planning docs before dev team starts — approve or request changes |
+| **Direct agent consult** | `/ask <role> <question>` any time, with or without an active project |
+| **Bug fix flow** | `/fix <path> <error>` — Dev fixes it, QA runs tests, screenshot sent to Telegram |
+| **Session persistence** | MongoDB stores sessions — server restarts don't lose work |
+| **No API billing** | Calls go through `claude` CLI — uses your Claude Max subscription |
+| **Structured comms** | All inter-agent messages are typed JSON envelopes, never natural language |
 
 ---
 
@@ -9,52 +24,55 @@
 ```
 You (Telegram)
    │
-   ▼ requirement text
-┌──────────────────────────────────────────────────────────┐
-│  BA  ──clarification loop (up to 4 rounds)──►  BRD       │  Haiku / Sonnet
-│  SA  ──► Architecture Document                           │  Opus
-│  PM  ──► Project Plan                                    │  Sonnet
-│  TL  ──► Technical Specification                         │  Opus
-└──────────────────────────────────────────────────────────┘
+   ▼  plain text requirement
+┌──────────────────────────────────────────────────────────────┐
+│  BA  ── clarification loop (up to 4 rounds) ──►  BRD         │  Haiku / Sonnet
+│  SA  ──► Architecture Document                               │  Opus
+│  PM  ──► Project Plan                                        │  Sonnet
+│  TL  ──► Technical Specification                             │  Opus
+└──────────────────────────────────────────────────────────────┘
    │
-   ▼  📋 "Approve or Request Changes?" (inline buttons)
+   ▼  📋 Approve or Request Changes? (inline keyboard)
    │
-   ▼ ✅ Approved
-┌──────────────────────────────────────────────────────────┐
-│  Backend Dev  ──► Implementation Guide + code   (Opus)   │
-│  Frontend Dev ──► Implementation Guide + code   (Sonnet) │  (parallel)
-│  QA           ──► Test Plan + test code         (Sonnet) │
-└──────────────────────────────────────────────────────────┘
+   ▼  ✅ Approved
+┌──────────────────────────────────────────────────────────────┐
+│  Backend Dev  ──► Implementation Guide + code       (Opus)   │
+│  Frontend Dev ──► Implementation Guide + code       (Sonnet) │  ← parallel
+│  QA           ──► Test Plan + test code             (Sonnet) │
+└──────────────────────────────────────────────────────────────┘
    │
-   ▼ All documents delivered to you in Telegram
+   ▼  All documents delivered to your Telegram chat
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+/fix flow (independent of pipeline — works on any project)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/fix /projects/myapp <error description>
+   │
+   ▼  Haiku triages relevant files  (cheap)
+   ▼  Opus analyses + generates fix (precise)
+   ▼  Writes patched files to disk
+   ▼  Runs test command via subprocess
+   ▼  Renders terminal output as PNG
+   ▼  Sends screenshot to Telegram  📸
 ```
-
-### Key design principles
-
-| Principle | Detail |
-|-----------|--------|
-| **Structured inter-agent comms** | Every agent-to-agent message is a typed `AgentMessage` JSON envelope — no natural language between agents |
-| **Model tiering** | Haiku → fast Q&A · Sonnet → structured docs · Opus → complex reasoning & code |
-| **Approval gate** | Planning phase pauses; you review and either approve or provide feedback |
-| **Parallel dev** | Backend Dev and Frontend Dev run concurrently after approval |
-| **Session persistence** | Active sessions are stored in MongoDB — server restarts don't lose work |
-| **Direct agent access** | `/ask <role> <message>` to consult any agent outside the pipeline |
-| **Max subscription** | Calls go through the `claude` CLI — no API billing, uses your Claude Max plan |
 
 ---
 
-## Agents & Model Assignments
+## Agents & Models
 
 | Agent | Model | Task |
 |-------|-------|------|
-| **BA** (clarify) | `claude-haiku-4-5` | Generates clarifying questions — fast & cheap |
-| **BA** (BRD) | `claude-sonnet-4-6` | Produces Business Requirements Document |
-| **Solution Architect** | `claude-opus-4-6` | Architecture design, ADRs, tech stack decisions |
+| **BA** — clarify | `claude-haiku-4-5` | Fast clarifying questions |
+| **BA** — BRD | `claude-sonnet-4-6` | Business Requirements Document |
+| **Solution Architect** | `claude-opus-4-6` | Architecture, ADRs, tech-stack decisions |
 | **Project Manager** | `claude-sonnet-4-6` | Project plan, phases, risks, milestones |
-| **Tech Lead** | `claude-opus-4-6` | API design, data models, sprint plan, tech spec |
+| **Tech Lead** | `claude-opus-4-6` | API design, data models, technical spec |
 | **Backend Dev** | `claude-opus-4-6` | Scaffold + real implementation code |
 | **Frontend Dev** | `claude-sonnet-4-6` | Components + real UI code |
 | **QA Engineer** | `claude-sonnet-4-6` | Test plan, test cases, CI config |
+| **Fixer** — triage | `claude-haiku-4-5` | Identify relevant files cheaply |
+| **Fixer** — patch | `claude-opus-4-6` | Analyse bug, generate & apply fix |
 
 ---
 
@@ -63,115 +81,147 @@ You (Telegram)
 ```
 se-agents/
 │
-├── main.py                  ← entry point
-├── config.py                ← model assignments & constants
+├── main.py                   ← entry point
+├── config.py                 ← model assignments per task
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
+├── docker-compose.yml
 │
 ├── core/
-│   ├── models.py            ← AgentMessage envelope, SessionState, dataclasses
-│   ├── claude.py            ← Claude wrapper — routes calls through `claude` CLI
-│   ├── storage.py           ← MongoDB session persistence (motor async)
-│   └── formatter.py         ← Telegram MarkdownV2 formatters per document type
+│   ├── models.py             ← AgentMessage envelope, SessionState, dataclasses
+│   ├── claude.py             ← calls `claude -p` CLI (uses Max subscription)
+│   ├── storage.py            ← MongoDB session persistence (motor async)
+│   └── formatter.py          ← Telegram MarkdownV2 formatters per document type
 │
 ├── agents/
-│   ├── ba.py                ← BA: multi-round clarification loop → BRD
-│   ├── sa.py                ← SA: BRD → Architecture Document
-│   ├── pm.py                ← PM: BRD + Arch → Project Plan
-│   ├── tech_lead.py         ← Tech Lead: all 3 → Technical Spec
-│   ├── dev_backend.py       ← Backend Dev: spec → implementation guide + code
-│   ├── dev_frontend.py      ← Frontend Dev: spec → implementation guide + code
-│   ├── qa.py                ← QA: spec + impls → test plan + test code
-│   ├── consult.py           ← Direct /ask <role> consultation handler
-│   └── orchestrator.py      ← state machine, session store, pipeline runner
+│   ├── orchestrator.py       ← pipeline state machine + session store
+│   ├── ba.py                 ← BA: clarification loop → BRD
+│   ├── sa.py                 ← SA: BRD → Architecture Document
+│   ├── pm.py                 ← PM: BRD + Arch → Project Plan
+│   ├── tech_lead.py          ← Tech Lead: → Technical Specification
+│   ├── dev_backend.py        ← Backend Dev: → implementation guide + code
+│   ├── dev_frontend.py       ← Frontend Dev: → implementation guide + code
+│   ├── qa.py                 ← QA: → test plan + test code
+│   ├── fixer.py              ← /fix: triage files, generate & apply patch
+│   ├── qa_runner.py          ← run tests, capture output, render PNG screenshot
+│   └── consult.py            ← /ask: direct per-role consultation
 │
 ├── bot/
-│   └── telegram.py          ← python-telegram-bot v21, inline keyboard approval
+│   └── telegram.py           ← python-telegram-bot v21, all command handlers
 │
-├── roles/                   ← Agent persona definitions (Claude Code / Cursor)
+├── roles/                    ← 18 agent persona definitions (Claude Code / Cursor)
 │   ├── ba-business-analyst.md
 │   ├── sa-solution-architect.md
-│   └── ...                  ← 18 role files total
+│   └── ...
 │
-└── src/                     ← legacy TypeScript prototype (reference only)
-    └── ...
+└── src/                      ← legacy TypeScript prototype (reference only)
 ```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.12 |
+| AI | Claude Code CLI (`claude -p`) — Max subscription, no API billing |
+| Telegram | python-telegram-bot v21 (async) |
+| Database | MongoDB via motor (async driver) |
+| Screenshots | Pillow — terminal output rendered as PNG |
+| Async | asyncio + `asyncio.gather()` for parallel dev agents |
+| Container | Docker + Docker Compose |
 
 ---
 
 ## Setup
 
-### 1. Prerequisites
+### Option A — Docker (recommended)
 
-- Python 3.11+
-- [Claude Code CLI](https://claude.ai/code) installed and logged in (`claude` available in PATH)
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- MongoDB running locally or a connection string (e.g. [MongoDB Atlas](https://www.mongodb.com/atlas))
-
-> **Why Claude Code CLI?**
-> Agent calls go through `claude -p` instead of the Anthropic API directly.
-> This means they consume your **Claude Max subscription** — no extra API billing.
-
-### 2. Install dependencies
+**Prerequisites:** Docker, Docker Compose, a Claude Max subscription, a Telegram bot token.
 
 ```bash
-pip install -r requirements.txt
-```
-
-### 3. Start MongoDB
-
-```bash
-# Docker (quickest)
-docker run -d -p 27017:27017 mongo
-
-# Or use a local install / MongoDB Atlas URI in .env
-```
-
-### 4. Configure
-
-```bash
+# 1. Clone and configure
+git clone https://github.com/hphun9/SE-Agents.git
+cd SE-Agents
 cp .env.example .env
+# Edit .env — fill in TELEGRAM_BOT_TOKEN and PROJECTS_DIR
+
+# 2. Authenticate Claude Code on the HOST machine (one-time)
+#    This saves auth tokens to ~/.claude which the container mounts read-only
+claude
+
+# 3. Start bot + MongoDB
+PROJECTS_DIR=/absolute/path/to/your/projects docker-compose up -d
+
+# 4. View logs
+docker-compose logs -f bot
 ```
 
-Edit `.env`:
+Your projects are mounted at `/projects` inside the container.
+Use container paths in `/fix`: `/fix /projects/myapp Fix the login error`.
 
-```env
-TELEGRAM_BOT_TOKEN=123456789:AAF...   # from @BotFather
-MONGODB_URI=mongodb://localhost:27017  # or Atlas URI
-MONGODB_DB=se_agents                  # database name
-```
+---
 
-### 5. Run
+### Option B — Local (development)
+
+**Prerequisites:** Python 3.11+, Node.js, MongoDB.
 
 ```bash
+# Install Python deps
+pip install -r requirements.txt
+
+# Install and authenticate Claude Code CLI
+npm install -g @anthropic-ai/claude-code
+claude   # log in
+
+# Start MongoDB
+docker run -d -p 27017:27017 mongo
+# or use MongoDB Atlas — set MONGODB_URI in .env
+
+# Configure
+cp .env.example .env
+# Fill in: TELEGRAM_BOT_TOKEN, MONGODB_URI, MONGODB_DB
+
+# Run
 python main.py
 ```
 
 ---
 
-## Usage
+## Environment Variables
 
-| Action | What to do |
-|--------|-----------|
-| Start a project | Send any text message with your requirement |
-| Answer clarification | Reply to the BA's questions in one message |
-| Approve plan | Tap **✅ Approve — Start Dev Team** |
-| Request changes | Tap **📝 Request Changes**, then describe what to change |
-| New project | Send `/new` or just send a new requirement after completion |
-| Check status | Send `/status` |
-| Consult an agent | `/ask <role> <question>` — works anytime, with or without active project |
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | ✅ | — | From [@BotFather](https://t.me/BotFather) |
+| `MONGODB_URI` | ✅ | `mongodb://localhost:27017` | MongoDB connection string |
+| `MONGODB_DB` | | `se_agents` | Database name |
+| `PROJECTS_DIR` | | `/tmp/projects` | Host path mounted as `/projects` in Docker |
 
-### Direct agent consultation — `/ask`
+---
 
-You can address any agent directly outside the pipeline:
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| _(any text)_ | Start a new project with that requirement |
+| `/new` | Clear current session and start fresh |
+| `/status` | Show current pipeline state |
+| `/ask <role> <question>` | Consult a specific agent directly |
+| `/fix <path> <error>` | Dev fixes a bug, QA tests it, screenshot sent |
+| `/help` | Show all commands and available roles |
+
+### `/ask` — direct agent consultation
+
+Address any agent directly, with or without an active project. If a session exists the agent automatically receives relevant documents as context.
 
 ```
-/ask ba   What requirements am I missing from this spec?
-/ask sa   Should I use microservices or a monolith for 10k users/day?
-/ask dev  Fix this 401 error — here's my auth middleware: [code]
-/ask qa   Write unit tests for the login flow
-/ask lead Review this API design
+/ask ba    What requirements am I missing?
+/ask sa    Should I use microservices or a monolith for 10k users/day?
+/ask lead  Review this API design: [paste design]
+/ask dev   Fix this 401 error — here's my middleware: [paste code]
+/ask qa    Write unit tests for the login flow
 ```
 
 **Available roles:**
@@ -186,53 +236,88 @@ You can address any agent directly outside the pipeline:
 | `frontend`, `fe`, `ui` | Frontend Developer | Sonnet |
 | `qa`, `test` | QA Engineer | Sonnet |
 
-If you have an active project, the agent automatically receives relevant documents (BRD, tech spec, etc.) as context.
+### `/fix` — bug fix with QA screenshot
 
-### Example pipeline flow
+Works on **any project** on your filesystem — no pipeline session required.
 
 ```
-You:  "I want to build a SaaS task management app for small dev teams"
+/fix /projects/myapp Getting 401 on every POST /api/auth/login
+```
 
-BA:   "Round 1 — I need clarification:
-       1. Web only, mobile, or both?
-       2. Real-time collaboration or async?
-       3. What integrations? (GitHub, Slack, etc.)"
+Flow:
+1. **Haiku** triages which files are relevant (cheap)
+2. **Opus** reads files, analyses the bug, generates a patch
+3. Bot writes the patched files to disk
+4. Runs the test command via subprocess
+5. Renders terminal output as a PNG and sends it to Telegram
 
-You:  "Web only for now. Real-time. GitHub and Slack integrations."
+---
 
-BA:   "Requirements confirmed! ✅"
-      [Delivers BRD]
+## Example Flows
 
-SA:   [Delivers Architecture Document]
-PM:   [Delivers Project Plan]
-TL:   [Delivers Technical Specification]
+### Full pipeline
 
-Bot:  "📋 Planning complete! Approve or request changes?"
-      [✅ Approve — Start Dev Team]  [📝 Request Changes]
+```
+You:   "Build a SaaS task manager for small dev teams"
 
-You:  ✅ Approve
+BA:    Round 1 — clarifying:
+         1. Web only or mobile too?
+         2. Real-time or async collaboration?
+         3. Any integrations? (GitHub, Slack…)
 
-Backend Dev:   [Delivers implementation guide + FastAPI code]
-Frontend Dev:  [Delivers implementation guide + React code]   ← parallel
-QA:            [Delivers test plan + pytest/Playwright tests]
+You:   "Web only. Real-time. GitHub + Slack."
 
-Bot:  "🎉 All done!"
+BA:    ✅ Requirements confirmed  →  [BRD delivered]
+SA:    [Architecture Document delivered]
+PM:    [Project Plan delivered]
+TL:    [Technical Specification delivered]
+
+Bot:   📋 Planning complete — approve or request changes?
+       [✅ Approve]   [📝 Request Changes]
+
+You:   ✅ Approve
+
+Dev:   Backend guide + FastAPI code       ← parallel
+Dev:   Frontend guide + React code        ← parallel
+QA:    Test plan + pytest/Playwright      ← after both devs finish
+
+Bot:   🎉 All done!
+```
+
+### Bug fix
+
+```
+You:   /fix /projects/myapp Getting 401 on every POST /api/auth/login
+
+Bot:   🔍 Dev agent is analysing /projects/myapp...
+
+Bot:   🔧 Fix applied
+         Analysis: JWT secret missing from config — middleware rejected all tokens
+         Files changed:
+           • auth/middleware.py  (modify)
+           • config/settings.py  (modify)
+         Summary: Added JWT_SECRET env var read; raises on missing value
+
+       🧪 Running tests...
+
+Bot:   [PNG screenshot — dark terminal, green ✓ PASSED]
+       ✓ All tests passed  |  pytest tests/test_auth.py -v
 ```
 
 ---
 
 ## Inter-Agent Message Format
 
-All agent-to-agent messages use a structured JSON envelope — no natural language between agents:
+All agent-to-agent communication uses a typed JSON envelope — no natural language between agents:
 
 ```json
 {
   "type": "REQUIREMENTS_CONFIRMED",
   "from_role": "BA",
   "to_role": "ORCHESTRATOR",
-  "payload": { "brd": { ... } },
+  "payload": { "brd": { "..." : "..." } },
   "metadata": {
-    "timestamp": "2026-04-06T10:00:00",
+    "timestamp": "2026-04-07T10:00:00",
     "project_id": "abc123",
     "session_id": "def456",
     "version": "1.0"
@@ -242,9 +327,28 @@ All agent-to-agent messages use a structured JSON envelope — no natural langua
 
 ---
 
-## Agent Definition Files
+## Troubleshooting
 
-The `roles/` folder contains detailed agent persona definitions for use with Claude Code CLI or Cursor IDE as standalone agents:
+**`claude: command not found`**
+Install Claude Code CLI: `npm install -g @anthropic-ai/claude-code`, then run `claude` to authenticate.
+
+**Bot doesn't respond after restart**
+Sessions are persisted in MongoDB. Check that `MONGODB_URI` is reachable: `python -c "import motor"`.
+
+**`/fix` says project not found**
+When using Docker, paths must be inside the container. Mount your project dir via `PROJECTS_DIR` and use `/projects/your-app` as the path.
+
+**Screenshot font is pixelated**
+The Dockerfile installs DejaVu fonts. If running locally, install `fonts-dejavu-core` (Linux) or the font will fall back to PIL's default bitmap font.
+
+**Telegram `Bad Request: can't parse entities`**
+The bot falls back to plain text automatically on MarkdownV2 parse errors. If a document looks garbled, this is the fallback kicking in — the content is still correct.
+
+---
+
+## Agent Persona Files
+
+The `roles/` folder contains detailed persona definitions you can load directly into Claude Code CLI or Cursor as standalone agents:
 
 | File | Role |
 |------|------|
@@ -258,11 +362,11 @@ The `roles/` folder contains detailed agent persona definitions for use with Cla
 | `roles/pm-technical-program-manager.md` | Cross-team coordination |
 | `roles/dev-tech-lead.md` | Code standards & reviews |
 | `roles/dev-backend.md` | API & microservices |
-| `roles/dev-frontend.md` | React/Vue/Angular |
+| `roles/dev-frontend.md` | React / Vue / Angular |
 | `roles/dev-fullstack.md` | Feature ownership |
 | `roles/qa-engineer.md` | Test planning |
 | `roles/qa-automation-engineer.md` | E2E automation |
-| `roles/qa-performance-tester.md` | Load testing |
+| `roles/qa-performance-tester.md` | Load & performance testing |
 | `roles/devops-engineer.md` | CI/CD & containers |
 | `roles/devops-cloud-architect.md` | Cloud infrastructure |
 | `roles/devops-sre.md` | Observability & SLOs |
