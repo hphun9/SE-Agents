@@ -131,14 +131,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    clear_session(update.effective_chat.id)
+    await clear_session(update.effective_chat.id)
     await _send(context.bot, update.effective_chat.id,
                 "🆕 Session cleared\\. Send your requirement to start a new project\\.")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
     if not session:
         await _send(context.bot, chat_id,
                     "📭 No active project\\. Send a requirement to start one\\.")
@@ -210,7 +210,7 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send(context.bot, chat_id, "Please include your question after the role name\\.")
         return
 
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
     async def _run() -> None:
         await _send(context.bot, chat_id, f"⏳ Consulting {_esc(args[0])}\\.\\.\\.")
@@ -229,7 +229,7 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id  = update.effective_chat.id
     text     = update.message.text or ""
-    session  = get_session(chat_id)
+    session  = await get_session(chat_id)
     bot      = context.bot
 
     cbs = _make_callbacks(bot, chat_id)
@@ -237,7 +237,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not session or session.state == SessionState.COMPLETE:
         # Fresh start
         if session and session.state == SessionState.COMPLETE:
-            clear_session(chat_id)
+            await clear_session(chat_id)
         await _send(bot, chat_id,
                     f"🚀 *Starting your project\\!*\n\n"
                     f"Requirement:\n_{_esc(text)}_\n\nThe team is spinning up\\.\\.\\."),

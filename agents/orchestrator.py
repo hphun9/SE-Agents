@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
 from typing import Callable, Awaitable
 
 from core.models import (
@@ -37,7 +36,11 @@ from core.formatter import (
     fmt_tech_spec, fmt_backend_impl, fmt_frontend_impl, fmt_qa_plan,
 )
 from config import MAX_BA_ROUNDS
-from core.storage import save_session as _db_save, load_session as _db_load, delete_session as _db_delete
+from core.storage import (
+    save_session as _db_save,
+    load_session as _db_load,
+    delete_session as _db_delete,
+)
 
 log = logging.getLogger(__name__)
 
@@ -46,23 +49,24 @@ ProgressCB  = Callable[[str], Awaitable[None]]
 ClarifyCB   = Callable[[list[str], str, int], Awaitable[None]]
 DocumentCB  = Callable[[str, list[str]], Awaitable[None]]
 CompleteCB  = Callable[[], Awaitable[None]]
-ApprovalCB  = Callable[[str], Awaitable[None]]   # receives project_id
+ApprovalCB  = Callable[[str], Awaitable[None]]
 ErrorCB     = Callable[[str], Awaitable[None]]
 
-# ─── In-memory session store (write-through to SQLite) ───────────────────────
+# ─── In-memory session store (write-through to MongoDB) ──────────────────────
 _sessions: dict[int, ProjectSession] = {}
 
 
-def get_session(chat_id: int) -> ProjectSession | None:
+async def get_session(chat_id: int) -> ProjectSession | None:
     if chat_id in _sessions:
         return _sessions[chat_id]
     # Restore from DB after server restart
-    session = _db_load(chat_id)
+    session = await _db_load(chat_id)
     if session:
         _sessions[chat_id] = session
     return session
 
-def create_session(chat_id: int, requirement: str) -> ProjectSession:
+
+async def create_session(chat_id: int, requirement: str) -> ProjectSession:
     s = ProjectSession(
         project_id=str(uuid.uuid4()),
         session_id=str(uuid.uuid4()),
@@ -71,17 +75,19 @@ def create_session(chat_id: int, requirement: str) -> ProjectSession:
         original_requirement=requirement,
     )
     _sessions[chat_id] = s
-    _db_save(s)
+    await _db_save(s)
     return s
 
-def clear_session(chat_id: int) -> None:
-    _sessions.pop(chat_id, None)
-    _db_delete(chat_id)
 
-def _persist(session: ProjectSession) -> None:
-    """Touch + write-through to SQLite."""
-    _persist(session)
-    _db_save(session)
+async def clear_session(chat_id: int) -> None:
+    _sessions.pop(chat_id, None)
+    await _db_delete(chat_id)
+
+
+async def _persist(session: ProjectSession) -> None:
+    """Touch + write-through to MongoDB."""
+    session.touch()
+    await _db_save(session)
 
 
 # ─── Envelope helper ─────────────────────────────────────────────────────────
@@ -117,7 +123,7 @@ async def start_project(
     on_complete: CompleteCB,
     on_error: ErrorCB,
 ) -> None:
-    session = create_session(chat_id, requirement)
+    session = await create_session(chat_id, requirement)
     _msg(MessageType.REQUIREMENT_INPUT, AgentRole.USER, AgentRole.BA,
          {"raw_requirement": requirement}, session)
 
@@ -145,15 +151,14 @@ async def handle_clarification_answer(
     on_complete: CompleteCB,
     on_error: ErrorCB,
 ) -> None:
-    session = _sessions.get(chat_id)
+    session = await get_session(chat_id)
     if not session or session.state != SessionState.BA_CLARIFYING:
         await on_error("No active clarification session. Send a new requirement to start.")
         return
 
-    # Record answers
     if session.clarification_rounds:
         session.clarification_rounds[-1].answers = answers
-    _persist(session)
+    await _persist(session)
 
     _msg(MessageType.CLARIFICATION_RESPONSE, AgentRole.USER, AgentRole.BA,
          {"answers": answers}, session)
@@ -179,8 +184,7 @@ async def handle_approval(
     on_complete: CompleteCB,
     on_error: ErrorCB,
 ) -> None:
-    """User approved — trigger dev team."""
-    session = _sessions.get(chat_id)
+    session = await get_session(chat_id)
     if not session or session.state != SessionState.AWAITING_APPROVAL:
         await on_error("Nothing pending approval.")
         return
@@ -190,11 +194,10 @@ async def handle_approval(
 
 
 async def handle_change_request(chat_id: int) -> None:
-    """Mark session as waiting for change feedback text."""
-    session = _sessions.get(chat_id)
+    session = await get_session(chat_id)
     if session:
         session.state = SessionState.FEEDBACK_PENDING
-        _persist(session)
+        await _persist(session)
 
 
 async def handle_change_feedback(
@@ -206,8 +209,7 @@ async def handle_change_feedback(
     on_complete: CompleteCB,
     on_error: ErrorCB,
 ) -> None:
-    """Re-run SA→PM→Tech Lead with user feedback."""
-    session = _sessions.get(chat_id)
+    session = await get_session(chat_id)
     if not session or session.state != SessionState.FEEDBACK_PENDING:
         await on_error("No pending feedback session.")
         return
@@ -235,20 +237,19 @@ async def _handle_ba_response(
             questions=response["questions"],
         ))
         session.state = SessionState.BA_CLARIFYING
-        _persist(session)
+        await _persist(session)
         _msg(MessageType.CLARIFICATION_REQUEST, AgentRole.BA, AgentRole.USER,
              response, session)
         await on_clarify(response["questions"], response.get("analysis", ""), response["iteration"])
         return
 
-    # Requirements complete
     brd = response.get("brd")
     if not brd:
         await on_error("BA returned REQUIREMENTS_COMPLETE but no BRD payload.")
         return
 
     session.brd = brd
-    _persist(session)
+    await _persist(session)
     _msg(MessageType.REQUIREMENTS_CONFIRMED, AgentRole.BA, AgentRole.ORCHESTRATOR,
          {"brd": brd}, session)
 
@@ -265,13 +266,8 @@ async def _run_planning_pipeline(
 ) -> None:
     assert session.brd is not None
 
-    # Build context note if there's change feedback
-    feedback_note = (
-        f"\n\nUSER CHANGE FEEDBACK: {session.change_feedback}"
-        if session.change_feedback else ""
-    )
     brd_with_note = dict(session.brd)
-    if feedback_note:
+    if session.change_feedback:
         brd_with_note["_change_feedback"] = session.change_feedback
 
     # SA
@@ -280,7 +276,7 @@ async def _run_planning_pipeline(
         await on_progress("🏗️ *Solution Architect is designing the architecture\\.\\.\\.*")
         arch = await sa_generate(brd_with_note)
         session.architecture = arch
-        _persist(session)
+        await _persist(session)
         _msg(MessageType.ARCHITECTURE_DOCUMENT, AgentRole.SA, AgentRole.ORCHESTRATOR,
              arch, session)
         await on_document("Architecture Document", fmt_architecture(arch))
@@ -295,7 +291,7 @@ async def _run_planning_pipeline(
         await on_progress("📅 *Project Manager is creating the plan\\.\\.\\.*")
         plan = await pm_generate(session.brd, arch)
         session.project_plan = plan
-        _persist(session)
+        await _persist(session)
         _msg(MessageType.PROJECT_PLAN, AgentRole.PM, AgentRole.ORCHESTRATOR,
              plan, session)
         await on_document("Project Plan", fmt_project_plan(plan))
@@ -310,7 +306,7 @@ async def _run_planning_pipeline(
         await on_progress("⚙️ *Tech Lead is writing the technical spec\\.\\.\\.*")
         spec = await tech_lead_generate(session.brd, arch, plan)
         session.tech_spec = spec
-        _persist(session)
+        await _persist(session)
         _msg(MessageType.TECHNICAL_SPEC, AgentRole.TECH_LEAD, AgentRole.ORCHESTRATOR,
              spec, session)
         await on_document("Technical Specification", fmt_tech_spec(spec))
@@ -319,10 +315,9 @@ async def _run_planning_pipeline(
         await on_error(f"Tech Lead error: {exc}")
         return
 
-    # Await user approval
     session.state = SessionState.AWAITING_APPROVAL
-    session.change_feedback = None   # reset for next revision
-    _persist(session)
+    session.change_feedback = None
+    await _persist(session)
     _msg(MessageType.APPROVAL_REQUEST, AgentRole.ORCHESTRATOR, AgentRole.USER,
          {"project_id": session.project_id}, session)
     await on_approval_needed(session.project_id)
@@ -338,11 +333,10 @@ async def _run_dev_pipeline(
     assert session.brd and session.architecture and session.tech_spec
 
     session.state = SessionState.DEV_PROCESSING
-
-    # Backend + Frontend run in parallel
     await on_progress(
         "🚀 *Dev team is starting\\! Backend and Frontend working in parallel\\.\\.\\.*"
     )
+
     try:
         backend_task  = asyncio.create_task(
             dev_backend_generate(session.brd, session.architecture, session.tech_spec)
@@ -358,7 +352,7 @@ async def _run_dev_pipeline(
 
     session.backend_impl  = backend_impl
     session.frontend_impl = frontend_impl
-    _persist(session)
+    await _persist(session)
 
     _msg(MessageType.BACKEND_IMPL,  AgentRole.DEV_BACKEND,  AgentRole.ORCHESTRATOR, backend_impl,  session)
     _msg(MessageType.FRONTEND_IMPL, AgentRole.DEV_FRONTEND, AgentRole.ORCHESTRATOR, frontend_impl, session)
@@ -366,13 +360,13 @@ async def _run_dev_pipeline(
     await on_document("Backend Implementation Guide",  fmt_backend_impl(backend_impl))
     await on_document("Frontend Implementation Guide", fmt_frontend_impl(frontend_impl))
 
-    # QA (needs both impl docs)
+    # QA
     try:
         session.state = SessionState.QA_PROCESSING
         await on_progress("🧪 *QA Engineer is writing the test plan\\.\\.\\.*")
         qa = await qa_generate(session.brd, session.tech_spec, backend_impl, frontend_impl)
         session.qa_plan = qa
-        _persist(session)
+        await _persist(session)
         _msg(MessageType.QA_PLAN, AgentRole.QA, AgentRole.ORCHESTRATOR, qa, session)
         await on_document("QA Plan", fmt_qa_plan(qa))
     except Exception as exc:
@@ -381,6 +375,6 @@ async def _run_dev_pipeline(
         return
 
     session.state = SessionState.COMPLETE
-    _persist(session)
+    await _persist(session)
     _msg(MessageType.PIPELINE_COMPLETE, AgentRole.ORCHESTRATOR, AgentRole.USER, {}, session)
     await on_complete()

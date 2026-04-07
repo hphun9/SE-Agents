@@ -1,65 +1,62 @@
 """
-Session persistence via SQLite.
+Session persistence via MongoDB (motor async driver).
 
-Uses the stdlib sqlite3 (sync) — DB ops are fast enough that async
-is not necessary here. Sessions are stored as JSON blobs keyed by chat_id.
+Config via env vars:
+  MONGODB_URI  — connection string (default: mongodb://localhost:27017)
+  MONGODB_DB   — database name    (default: se_agents)
 """
 
 from __future__ import annotations
 import dataclasses
-import json
-import sqlite3
-from pathlib import Path
+import os
+
+import motor.motor_asyncio
 
 from core.models import ClarificationRound, ProjectSession, SessionState
 
-DB_PATH = Path("sessions.db")
+# ─── Connection (lazy init) ───────────────────────────────────────────────────
+
+_client: motor.motor_asyncio.AsyncIOMotorClient | None = None
+_col = None
 
 
-# ─── Schema ──────────────────────────────────────────────────────────────────
+def _get_col():
+    global _client, _col
+    if _col is None:
+        uri     = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+        db_name = os.getenv("MONGODB_DB",  "se_agents")
+        _client = motor.motor_asyncio.AsyncIOMotorClient(uri)
+        _col    = _client[db_name]["sessions"]
+    return _col
 
-def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                chat_id    INTEGER PRIMARY KEY,
-                data       TEXT    NOT NULL,
-                updated_at TEXT    NOT NULL
-            )
-        """)
+
+# ─── Schema init ─────────────────────────────────────────────────────────────
+
+async def init_db() -> None:
+    await _get_col().create_index("chat_id", unique=True)
 
 
 # ─── CRUD ────────────────────────────────────────────────────────────────────
 
-def save_session(session: ProjectSession) -> None:
-    data = json.dumps(_to_dict(session))
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute(
-            "INSERT OR REPLACE INTO sessions (chat_id, data, updated_at) VALUES (?, ?, ?)",
-            (session.chat_id, data, session.updated_at),
-        )
+async def save_session(session: ProjectSession) -> None:
+    data = dataclasses.asdict(session)   # enums with str base serialize as strings
+    await _get_col().update_one(
+        {"chat_id": session.chat_id},
+        {"$set": data},
+        upsert=True,
+    )
 
 
-def load_session(chat_id: int) -> ProjectSession | None:
-    with sqlite3.connect(DB_PATH) as db:
-        row = db.execute(
-            "SELECT data FROM sessions WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
-    return _from_dict(json.loads(row[0])) if row else None
+async def load_session(chat_id: int) -> ProjectSession | None:
+    doc = await _get_col().find_one({"chat_id": chat_id}, {"_id": 0})
+    return _from_dict(doc) if doc else None
 
 
-def delete_session(chat_id: int) -> None:
-    with sqlite3.connect(DB_PATH) as db:
-        db.execute("DELETE FROM sessions WHERE chat_id = ?", (chat_id,))
+async def delete_session(chat_id: int) -> None:
+    await _get_col().delete_one({"chat_id": chat_id})
 
 
-# ─── Serialisation ───────────────────────────────────────────────────────────
-
-def _to_dict(session: ProjectSession) -> dict:
-    # dataclasses.asdict recurses into nested dataclasses; enums with str
-    # base serialize naturally through json.dumps
-    return dataclasses.asdict(session)
-
+# ─── Deserialisation ─────────────────────────────────────────────────────────
 
 def _from_dict(d: dict) -> ProjectSession:
     d = dict(d)
