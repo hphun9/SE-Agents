@@ -259,14 +259,14 @@ class Orchestrator:
     async def _cmd_secretary(self, plt: str, cid: str, message: str) -> None:
         """
         Natural-language dispatcher — chat freely and the secretary
-        automatically routes to the right specialist.
+        automatically routes to the right specialist or starts the pipeline.
         """
         if not message:
             await self._send(plt, cid,
                 "👋 *Hi\\! I'm your Secretary\\.* Just tell me what you need in plain language "
                 "and I'll connect you to the right team member\\.\n\n"
                 f"*The team:*\n{team_roster()}\n\n"
-                "Example: `/s how should I design my auth service?`"
+                "Just describe a project to start, or ask me anything\\!"
             )
             return
 
@@ -279,18 +279,31 @@ class Orchestrator:
             await self._send(plt, cid, f"❌ Secretary error: {_esc(str(exc))}")
             return
 
-        if result["routed_to"] == "secretary":
-            # Direct answer — no routing needed
-            header = "🤖 *Secretary*"
-        else:
-            # Routed to a specialist — show who answered
-            header = (
-                f"{result['emoji']} *{_esc(result['role_name'])}* "
-                f"\\(via Secretary\\)"
+        if result["routed_to"] == "project":
+            # User described a project via /s — start the pipeline
+            active = await self._get_session(cid)
+            if active and active.state not in (SessionState.COMPLETE,):
+                await self._send(plt, cid,
+                    "⏳ You already have an active project\\. Use /new to clear it first\\."
+                )
+                return
+            if active:
+                await self._clear_session(cid)
+            await self._send(plt, cid,
+                f"🚀 *Starting your project\\!*\n\n"
+                f"Requirement:\n_{_esc(message)}_\n\nThe team is spinning up\\.\\.\\."
             )
+            new_session = await self._new_session(cid, message)
+            asyncio.create_task(self._run_pipeline(plt, cid, new_session, auto_approve=False))
 
-        await self._send(plt, cid, header)
-        await self._send(plt, cid, result["response"])
+        elif result["routed_to"] == "secretary":
+            await self._send(plt, cid, result["response"])
+
+        else:
+            # Specialist answered
+            header = f"{result['emoji']} *{_esc(result['role_name'])}* \\(via Secretary\\)"
+            await self._send(plt, cid, header)
+            await self._send(plt, cid, result["response"])
 
     async def _cmd_fix(self, plt: str, cid: str, args: str) -> None:
         parts = args.split(None, 1)
@@ -539,16 +552,14 @@ class Orchestrator:
 
     async def _handle_text(self, plt: str, cid: str, text: str) -> None:
         session = await self._get_session(cid)
+
+        # ── No active session: let the Secretary classify intent first ────────
         if not session or session.state == SessionState.COMPLETE:
             if session:
                 await self._clear_session(cid)
-            await self._send(plt, cid,
-                f"🚀 *Starting your project\\!*\n\n"
-                f"Requirement:\n_{_esc(text)}_\n\nThe team is spinning up\\.\\.\\."
-            )
-            session = await self._new_session(cid, text)
-            await self._run_pipeline(plt, cid, session, auto_approve=False)
+            asyncio.create_task(self._secretary_gate(plt, cid, text))
 
+        # ── Mid-pipeline: pass answer back into the active flow ───────────────
         elif session.state == SessionState.BA_CLARIFYING:
             await self._handle_clarification(plt, cid, session, text)
 
@@ -560,6 +571,40 @@ class Orchestrator:
             await self._send(plt, cid,
                 f"⏳ The team is still working\\. State: *{_esc(session.state)}*"
             )
+
+    async def _secretary_gate(self, plt: str, cid: str, text: str) -> None:
+        """
+        Classify intent via the Secretary before deciding what to do.
+        Called for every plain-text message when there is no active session.
+
+        - "project"   → start the full pipeline
+        - specialist  → answer the question, no pipeline
+        - "secretary" → greet / explain capabilities
+        """
+        try:
+            result = await secretary_dispatch(text)
+        except Exception as exc:
+            log.exception("secretary_gate classification failed")
+            # Fall back to treating it as a project requirement
+            result = {"routed_to": "project", "emoji": "🚀",
+                      "role_name": "Pipeline", "response": "", "reason": str(exc)}
+
+        if result["routed_to"] == "project":
+            await self._send(plt, cid,
+                f"🚀 *Starting your project\\!*\n\n"
+                f"Requirement:\n_{_esc(text)}_\n\nThe team is spinning up\\.\\.\\."
+            )
+            session = await self._new_session(cid, text)
+            await self._run_pipeline(plt, cid, session, auto_approve=False)
+
+        elif result["routed_to"] == "secretary":
+            await self._send(plt, cid, result["response"])
+
+        else:
+            # Specialist answer — show who responded
+            header = f"{result['emoji']} *{_esc(result['role_name'])}*"
+            await self._send(plt, cid, header)
+            await self._send(plt, cid, result["response"])
 
     async def _handle_callback(self, plt: str, cid: str, data: str) -> None:
         session = await self._get_session(cid)
