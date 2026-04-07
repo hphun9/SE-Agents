@@ -1,380 +1,688 @@
 """
-Orchestrator
+Orchestrator v2
 
-Full pipeline state machine:
-  USER → BA (clarify loop) → SA → PM → Tech Lead
-       → [USER APPROVAL]
-       → Backend Dev ┐ (parallel)
-         Frontend Dev┘
-       → QA
-       → COMPLETE
-
-All inter-agent messages use AgentMessage envelopes (structured JSON).
-Natural language only in Telegram-facing callbacks.
+Adapter-agnostic pipeline state machine.
+Receives IncomingMessage from any chat adapter and sends OutgoingMessage back.
+Supports interactive mode (existing flow) and autonomous/queue mode.
 """
-
 from __future__ import annotations
 import asyncio
+import dataclasses
 import json
 import logging
+import os
 import uuid
-from typing import Callable, Awaitable
+from collections import deque
+from typing import Optional
 
+from adapters.base import ChatAdapter, IncomingMessage, OutgoingMessage
 from core.models import (
     AgentMessage, AgentRole, MessageType,
     ClarificationRound, ProjectSession, SessionState,
+    QueuedProject,
 )
-from agents.ba import ba_process_initial, ba_process_clarification, ba_force_brd
+from core.storage import save_session as _db_save, load_session as _db_load, delete_session as _db_delete
+from core.formatter import (
+    fmt_brd, fmt_architecture, fmt_project_plan,
+    fmt_tech_spec, fmt_backend_impl, fmt_frontend_impl, fmt_qa_plan,
+)
+from agents.ba import ba_process_initial, ba_process_clarification
 from agents.sa import sa_generate
 from agents.pm import pm_generate
 from agents.tech_lead import tech_lead_generate
 from agents.dev_backend import dev_backend_generate
 from agents.dev_frontend import dev_frontend_generate
 from agents.qa import qa_generate
-from core.formatter import (
-    fmt_brd, fmt_architecture, fmt_project_plan,
-    fmt_tech_spec, fmt_backend_impl, fmt_frontend_impl, fmt_qa_plan,
-)
+from agents.fixer import analyze_and_fix
+from agents.qa_runner import run_tests
+from agents.consult import consult_agent, resolve_role, list_roles
+from core.knowledge_base import search_similar, save_solution, get_stats, search_for_user
 from config import MAX_BA_ROUNDS
-from core.storage import (
-    save_session as _db_save,
-    load_session as _db_load,
-    delete_session as _db_delete,
-)
+from workspace.writer import WorkspaceWriter
+from workspace.git_integration import GitIntegration
 
 log = logging.getLogger(__name__)
 
-# Callback type aliases
-ProgressCB  = Callable[[str], Awaitable[None]]
-ClarifyCB   = Callable[[list[str], str, int], Awaitable[None]]
-DocumentCB  = Callable[[str, list[str]], Awaitable[None]]
-CompleteCB  = Callable[[], Awaitable[None]]
-ApprovalCB  = Callable[[str], Awaitable[None]]
-ErrorCB     = Callable[[str], Awaitable[None]]
+# ─── In-memory session store ─────────────────────────────────────────────────
+_sessions: dict[str, ProjectSession] = {}   # key = chat_id (str)
 
-# ─── In-memory session store (write-through to MongoDB) ──────────────────────
-_sessions: dict[int, ProjectSession] = {}
+# ─── MarkdownV2 escape helper ────────────────────────────────────────────────
+import re as _re
+def _esc(t: str) -> str:
+    return _re.sub(r"([_*\[\]()~`>#+\-=|{}.!\\])", r"\\\1", str(t))
 
+class Orchestrator:
+    def __init__(self):
+        self._adapters: dict[str, ChatAdapter] = {}
+        self._queue: deque[QueuedProject] = deque()
+        self._queue_running = False
+        self._autonomous = False
+        self._default_prefs: dict = {}
+        self._workspace = WorkspaceWriter(os.getenv("PROJECTS_DIR", "/tmp/projects"))
 
-async def get_session(chat_id: int) -> ProjectSession | None:
-    if chat_id in _sessions:
-        return _sessions[chat_id]
-    # Restore from DB after server restart
-    session = await _db_load(chat_id)
-    if session:
-        _sessions[chat_id] = session
-    return session
+    # ─── Adapter registry ────────────────────────────────────────────────────
 
+    def register_adapter(self, adapter: ChatAdapter) -> None:
+        self._adapters[adapter.platform_name] = adapter
 
-async def create_session(chat_id: int, requirement: str) -> ProjectSession:
-    s = ProjectSession(
-        project_id=str(uuid.uuid4()),
-        session_id=str(uuid.uuid4()),
-        chat_id=chat_id,
-        state=SessionState.BA_CLARIFYING,
-        original_requirement=requirement,
-    )
-    _sessions[chat_id] = s
-    await _db_save(s)
-    return s
+    def _adapter_for(self, platform: str) -> Optional[ChatAdapter]:
+        return self._adapters.get(platform)
 
+    # ─── Session helpers ─────────────────────────────────────────────────────
 
-async def clear_session(chat_id: int) -> None:
-    _sessions.pop(chat_id, None)
-    await _db_delete(chat_id)
+    async def _get_session(self, chat_id: str) -> Optional[ProjectSession]:
+        if chat_id in _sessions:
+            return _sessions[chat_id]
+        s = await _db_load(int(chat_id) if chat_id.isdigit() else 0)
+        if s:
+            _sessions[chat_id] = s
+        return s
 
-
-async def _persist(session: ProjectSession) -> None:
-    """Touch + write-through to MongoDB."""
-    session.touch()
-    await _db_save(session)
-
-
-# ─── Envelope helper ─────────────────────────────────────────────────────────
-
-def _msg(
-    type_: MessageType,
-    from_: AgentRole,
-    to: AgentRole,
-    payload: dict,
-    session: ProjectSession,
-) -> AgentMessage:
-    m = AgentMessage(
-        type=type_, from_role=from_, to_role=to,
-        payload=payload,
-        metadata={
-            "project_id": session.project_id,
-            "session_id": session.session_id,
-        },
-    )
-    log.debug("[%s→%s] %s", from_.value, to.value, json.dumps(m.metadata))
-    return m
-
-
-# ─── Entry points ─────────────────────────────────────────────────────────────
-
-async def start_project(
-    chat_id: int,
-    requirement: str,
-    on_progress: ProgressCB,
-    on_clarify: ClarifyCB,
-    on_document: DocumentCB,
-    on_approval_needed: ApprovalCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    session = await create_session(chat_id, requirement)
-    _msg(MessageType.REQUIREMENT_INPUT, AgentRole.USER, AgentRole.BA,
-         {"raw_requirement": requirement}, session)
-
-    await on_progress("🔍 *BA is analysing your requirement\\.\\.\\.*")
-    try:
-        response = await ba_process_initial(session)
-        await _handle_ba_response(
-            response, session,
-            on_progress, on_clarify, on_document,
-            on_approval_needed, on_complete, on_error,
+    async def _new_session(self, chat_id: str, requirement: str) -> ProjectSession:
+        s = ProjectSession(
+            project_id=str(uuid.uuid4()),
+            session_id=str(uuid.uuid4()),
+            chat_id=int(chat_id) if chat_id.isdigit() else hash(chat_id),
+            state=SessionState.BA_CLARIFYING,
+            original_requirement=requirement,
         )
-    except Exception as exc:
-        log.exception("BA initial error")
-        session.state = SessionState.COMPLETE
-        await on_error(str(exc))
+        _sessions[chat_id] = s
+        await _db_save(s)
+        return s
 
+    async def _clear_session(self, chat_id: str) -> None:
+        _sessions.pop(chat_id, None)
+        if chat_id.isdigit():
+            await _db_delete(int(chat_id))
 
-async def handle_clarification_answer(
-    chat_id: int,
-    answers: str,
-    on_progress: ProgressCB,
-    on_clarify: ClarifyCB,
-    on_document: DocumentCB,
-    on_approval_needed: ApprovalCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    session = await get_session(chat_id)
-    if not session or session.state != SessionState.BA_CLARIFYING:
-        await on_error("No active clarification session. Send a new requirement to start.")
-        return
+    async def _persist(self, session: ProjectSession) -> None:
+        session.touch()
+        await _db_save(session)
 
-    if session.clarification_rounds:
-        session.clarification_rounds[-1].answers = answers
-    await _persist(session)
+    # ─── Send helpers ─────────────────────────────────────────────────────────
 
-    _msg(MessageType.CLARIFICATION_RESPONSE, AgentRole.USER, AgentRole.BA,
-         {"answers": answers}, session)
+    async def _send(self, platform: str, chat_id: str, text: str) -> None:
+        adapter = self._adapter_for(platform)
+        if adapter:
+            await adapter.send(OutgoingMessage(chat_id=chat_id, text=text))
 
-    await on_progress("🤔 *BA is reviewing your answers\\.\\.\\.*")
-    try:
-        response = await ba_process_clarification(session, answers)
-        await _handle_ba_response(
-            response, session,
-            on_progress, on_clarify, on_document,
-            on_approval_needed, on_complete, on_error,
-        )
-    except Exception as exc:
-        log.exception("BA clarification error")
-        session.state = SessionState.COMPLETE
-        await on_error(str(exc))
+    async def _send_photo(self, platform: str, chat_id: str, photo: bytes, caption: str = "") -> None:
+        adapter = self._adapter_for(platform)
+        if adapter:
+            await adapter.send(OutgoingMessage(
+                chat_id=chat_id, text="", photo_bytes=photo, photo_caption=caption,
+            ))
 
-
-async def handle_approval(
-    chat_id: int,
-    on_progress: ProgressCB,
-    on_document: DocumentCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    session = await get_session(chat_id)
-    if not session or session.state != SessionState.AWAITING_APPROVAL:
-        await on_error("Nothing pending approval.")
-        return
-    _msg(MessageType.APPROVAL_GRANTED, AgentRole.USER, AgentRole.ORCHESTRATOR,
-         {}, session)
-    await _run_dev_pipeline(session, on_progress, on_document, on_complete, on_error)
-
-
-async def handle_change_request(chat_id: int) -> None:
-    session = await get_session(chat_id)
-    if session:
-        session.state = SessionState.FEEDBACK_PENDING
-        await _persist(session)
-
-
-async def handle_change_feedback(
-    chat_id: int,
-    feedback: str,
-    on_progress: ProgressCB,
-    on_document: DocumentCB,
-    on_approval_needed: ApprovalCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    session = await get_session(chat_id)
-    if not session or session.state != SessionState.FEEDBACK_PENDING:
-        await on_error("No pending feedback session.")
-        return
-    session.change_feedback = feedback
-    _msg(MessageType.CHANGE_REQUESTED, AgentRole.USER, AgentRole.ORCHESTRATOR,
-         {"feedback": feedback}, session)
-    await _run_planning_pipeline(session, on_progress, on_document, on_approval_needed, on_error)
-
-
-# ─── Internal pipeline stages ────────────────────────────────────────────────
-
-async def _handle_ba_response(
-    response: dict,
-    session: ProjectSession,
-    on_progress: ProgressCB,
-    on_clarify: ClarifyCB,
-    on_document: DocumentCB,
-    on_approval_needed: ApprovalCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    if response.get("status") == "NEEDS_CLARIFICATION":
-        session.clarification_rounds.append(ClarificationRound(
-            iteration=response["iteration"],
-            questions=response["questions"],
+    async def _send_approval(self, platform: str, chat_id: str, project_id: str) -> None:
+        adapter = self._adapter_for(platform)
+        if not adapter:
+            return
+        await adapter.send(OutgoingMessage(
+            chat_id=chat_id,
+            text=(
+                "📋 *Planning complete\\!*\n\n"
+                "The team has produced:\n"
+                "• ✅ Business Requirements Document\n"
+                "• 🏗️ Architecture Document\n"
+                "• 📅 Project Plan\n"
+                "• ⚙️ Technical Specification\n\n"
+                "Ready to hand off to the dev team?"
+            ),
+            inline_buttons=[[
+                {"text": "✅ Approve — Start Dev Team", "callback_data": f"approve:{project_id}"},
+                {"text": "📝 Request Changes",          "callback_data": f"changes:{project_id}"},
+            ]],
         ))
-        session.state = SessionState.BA_CLARIFYING
-        await _persist(session)
-        _msg(MessageType.CLARIFICATION_REQUEST, AgentRole.BA, AgentRole.USER,
-             response, session)
-        await on_clarify(response["questions"], response.get("analysis", ""), response["iteration"])
-        return
 
-    brd = response.get("brd")
-    if not brd:
-        await on_error("BA returned REQUIREMENTS_COMPLETE but no BRD payload.")
-        return
+    # ─── Main message entry point ─────────────────────────────────────────────
 
-    session.brd = brd
-    await _persist(session)
-    _msg(MessageType.REQUIREMENTS_CONFIRMED, AgentRole.BA, AgentRole.ORCHESTRATOR,
-         {"brd": brd}, session)
+    async def handle_message(self, msg: IncomingMessage) -> None:
+        """Route any incoming message from any adapter."""
+        cid = msg.chat_id
+        plt = msg.platform
+        text = msg.text.strip()
 
-    await on_document("Business Requirements Document", fmt_brd(brd))
-    await _run_planning_pipeline(session, on_progress, on_document, on_approval_needed, on_error)
+        # ── Callback (button tap) ──
+        if msg.callback_data:
+            asyncio.create_task(self._handle_callback(plt, cid, msg.callback_data))
+            return
 
+        # ── Commands ──
+        if text.startswith("/start"):
+            await self._cmd_start(plt, cid)
+        elif text.startswith("/new"):
+            await self._cmd_new(plt, cid)
+        elif text.startswith("/status"):
+            await self._cmd_status(plt, cid)
+        elif text.startswith("/help"):
+            await self._cmd_help(plt, cid)
+        elif text.startswith("/ask "):
+            asyncio.create_task(self._cmd_ask(plt, cid, text[5:].strip()))
+        elif text.startswith("/fix "):
+            asyncio.create_task(self._cmd_fix(plt, cid, text[5:].strip()))
+        elif text.startswith("/queue"):
+            asyncio.create_task(self._cmd_queue(plt, cid, text))
+        elif text.startswith("/auto"):
+            await self._cmd_auto(plt, cid, text)
+        elif text.startswith("/overnight "):
+            asyncio.create_task(self._cmd_overnight(plt, cid, text[11:].strip()))
+        elif text.startswith("/kb"):
+            asyncio.create_task(self._cmd_kb(plt, cid, text))
+        elif text.startswith("/"):
+            await self._send(plt, cid, f"Unknown command\\. Send /help for usage\\.")
+        else:
+            # ── Plain text → pipeline input ──
+            asyncio.create_task(self._handle_text(plt, cid, text))
 
-async def _run_planning_pipeline(
-    session: ProjectSession,
-    on_progress: ProgressCB,
-    on_document: DocumentCB,
-    on_approval_needed: ApprovalCB,
-    on_error: ErrorCB,
-) -> None:
-    assert session.brd is not None
+    # ─── Command handlers ─────────────────────────────────────────────────────
 
-    brd_with_note = dict(session.brd)
-    if session.change_feedback:
-        brd_with_note["_change_feedback"] = session.change_feedback
-
-    # SA
-    try:
-        session.state = SessionState.SA_PROCESSING
-        await on_progress("🏗️ *Solution Architect is designing the architecture\\.\\.\\.*")
-        arch = await sa_generate(brd_with_note)
-        session.architecture = arch
-        await _persist(session)
-        _msg(MessageType.ARCHITECTURE_DOCUMENT, AgentRole.SA, AgentRole.ORCHESTRATOR,
-             arch, session)
-        await on_document("Architecture Document", fmt_architecture(arch))
-    except Exception as exc:
-        log.exception("SA error")
-        await on_error(f"SA error: {exc}")
-        return
-
-    # PM
-    try:
-        session.state = SessionState.PM_PROCESSING
-        await on_progress("📅 *Project Manager is creating the plan\\.\\.\\.*")
-        plan = await pm_generate(session.brd, arch)
-        session.project_plan = plan
-        await _persist(session)
-        _msg(MessageType.PROJECT_PLAN, AgentRole.PM, AgentRole.ORCHESTRATOR,
-             plan, session)
-        await on_document("Project Plan", fmt_project_plan(plan))
-    except Exception as exc:
-        log.exception("PM error")
-        await on_error(f"PM error: {exc}")
-        return
-
-    # Tech Lead
-    try:
-        session.state = SessionState.TECH_LEAD_PROCESSING
-        await on_progress("⚙️ *Tech Lead is writing the technical spec\\.\\.\\.*")
-        spec = await tech_lead_generate(session.brd, arch, plan)
-        session.tech_spec = spec
-        await _persist(session)
-        _msg(MessageType.TECHNICAL_SPEC, AgentRole.TECH_LEAD, AgentRole.ORCHESTRATOR,
-             spec, session)
-        await on_document("Technical Specification", fmt_tech_spec(spec))
-    except Exception as exc:
-        log.exception("Tech Lead error")
-        await on_error(f"Tech Lead error: {exc}")
-        return
-
-    session.state = SessionState.AWAITING_APPROVAL
-    session.change_feedback = None
-    await _persist(session)
-    _msg(MessageType.APPROVAL_REQUEST, AgentRole.ORCHESTRATOR, AgentRole.USER,
-         {"project_id": session.project_id}, session)
-    await on_approval_needed(session.project_id)
-
-
-async def _run_dev_pipeline(
-    session: ProjectSession,
-    on_progress: ProgressCB,
-    on_document: DocumentCB,
-    on_complete: CompleteCB,
-    on_error: ErrorCB,
-) -> None:
-    assert session.brd and session.architecture and session.tech_spec
-
-    session.state = SessionState.DEV_PROCESSING
-    await on_progress(
-        "🚀 *Dev team is starting\\! Backend and Frontend working in parallel\\.\\.\\.*"
-    )
-
-    try:
-        backend_task  = asyncio.create_task(
-            dev_backend_generate(session.brd, session.architecture, session.tech_spec)
+    async def _cmd_start(self, plt: str, cid: str) -> None:
+        await self._send(plt, cid,
+            "👋 *Welcome to SE\\-Agents v1\\.0\\.0\\!*\n\n"
+            "I'm your AI software development team\\. Send your project requirement to begin\\.\n\n"
+            "Or send /help to see all commands\\."
         )
-        frontend_task = asyncio.create_task(
-            dev_frontend_generate(session.brd, session.architecture, session.tech_spec)
+
+    async def _cmd_new(self, plt: str, cid: str) -> None:
+        await self._clear_session(cid)
+        await self._send(plt, cid, "🆕 Session cleared\\. Send a requirement to start\\.")
+
+    async def _cmd_status(self, plt: str, cid: str) -> None:
+        session = await self._get_session(cid)
+        if not session:
+            await self._send(plt, cid, "📭 No active project\\. Send a requirement to start\\.")
+            return
+        labels = {
+            SessionState.BA_CLARIFYING:        "🔍 BA is gathering requirements",
+            SessionState.SA_PROCESSING:        "🏗️ SA is designing architecture",
+            SessionState.PM_PROCESSING:        "📅 PM is creating project plan",
+            SessionState.TECH_LEAD_PROCESSING: "⚙️ Tech Lead is writing spec",
+            SessionState.AWAITING_APPROVAL:    "🔔 Awaiting your approval",
+            SessionState.FEEDBACK_PENDING:     "📝 Awaiting your change feedback",
+            SessionState.DEV_PROCESSING:       "💻 Dev team is implementing",
+            SessionState.QA_PROCESSING:        "🧪 QA is writing test plan",
+            SessionState.COMPLETE:             "✅ Pipeline complete",
+        }
+        label = _esc(labels.get(session.state, session.state))
+        queue_info = f"\n*Queue:* {len(self._queue)} project\\(s\\) waiting" if self._queue else ""
+        auto_info = "\n*Mode:* 🤖 Autonomous" if self._autonomous else ""
+        await self._send(plt, cid,
+            f"📊 *Project Status*\n\n"
+            f"*ID:* `{_esc(session.project_id[:8])}`\n"
+            f"*State:* {label}\n"
+            f"*BA rounds:* {len(session.clarification_rounds)}\n"
+            f"*Started:* {_esc(session.created_at[:10])}"
+            f"{queue_info}{auto_info}"
         )
-        backend_impl, frontend_impl = await asyncio.gather(backend_task, frontend_task)
-    except Exception as exc:
-        log.exception("Dev parallel error")
-        await on_error(f"Dev error: {exc}")
-        return
 
-    session.backend_impl  = backend_impl
-    session.frontend_impl = frontend_impl
-    await _persist(session)
+    async def _cmd_help(self, plt: str, cid: str) -> None:
+        await self._send(plt, cid,
+            "📖 *Commands*\n\n"
+            "*(any text)* — start a new project\n"
+            "/new — clear current session\n"
+            "/status — pipeline status\n"
+            "/ask \\<role\\> \\<question\\> — consult an agent\n"
+            "/fix \\<path\\> \\<error\\> — dev fixes bug \\+ QA screenshot\n"
+            "/queue \\<requirement\\> — queue a project\n"
+            "/queue list — show queue\n"
+            "/queue clear — clear queue\n"
+            "/auto on|off — toggle autonomous mode\n"
+            "/overnight \\<requirement\\> — queue with auto\\-approve\n"
+            "/kb stats — knowledge base statistics\n"
+            "/kb search \\<query\\> — search past solutions\n"
+            "/help — this message\n\n"
+            f"*Roles for /ask:*\n{list_roles()}"
+        )
 
-    _msg(MessageType.BACKEND_IMPL,  AgentRole.DEV_BACKEND,  AgentRole.ORCHESTRATOR, backend_impl,  session)
-    _msg(MessageType.FRONTEND_IMPL, AgentRole.DEV_FRONTEND, AgentRole.ORCHESTRATOR, frontend_impl, session)
+    async def _cmd_ask(self, plt: str, cid: str, args: str) -> None:
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            await self._send(plt, cid, "Usage: `/ask <role> <question>`")
+            return
+        role_key = resolve_role(parts[0])
+        if not role_key:
+            await self._send(plt, cid, f"Unknown role: `{_esc(parts[0])}`\n\n{list_roles()}")
+            return
+        session = await self._get_session(cid)
+        await self._send(plt, cid, f"⏳ Consulting {_esc(parts[0])}\\.\\.\\.")
+        try:
+            response = await consult_agent(role_key, parts[1], session)
+            await self._send(plt, cid, response)
+        except Exception as exc:
+            log.exception("consult_agent error")
+            await self._send(plt, cid, f"❌ Error: {_esc(str(exc))}")
 
-    await on_document("Backend Implementation Guide",  fmt_backend_impl(backend_impl))
-    await on_document("Frontend Implementation Guide", fmt_frontend_impl(frontend_impl))
+    async def _cmd_fix(self, plt: str, cid: str, args: str) -> None:
+        parts = args.split(None, 1)
+        if len(parts) < 2:
+            await self._send(plt, cid,
+                "Usage: `/fix <project_path> <error description>`\n"
+                "Example: `/fix /projects/myapp Fix 401 on POST /api/auth`"
+            )
+            return
+        project_path, error_desc = parts[0], parts[1]
+        await self._send(plt, cid, f"🔍 *Dev agent is analysing* `{_esc(project_path)}`\\.\\.\\.")
 
-    # QA
-    try:
-        session.state = SessionState.QA_PROCESSING
-        await on_progress("🧪 *QA Engineer is writing the test plan\\.\\.\\.*")
-        qa = await qa_generate(session.brd, session.tech_spec, backend_impl, frontend_impl)
-        session.qa_plan = qa
-        await _persist(session)
-        _msg(MessageType.QA_PLAN, AgentRole.QA, AgentRole.ORCHESTRATOR, qa, session)
-        await on_document("QA Plan", fmt_qa_plan(qa))
-    except Exception as exc:
-        log.exception("QA error")
-        await on_error(f"QA error: {exc}")
-        return
+        # ── Step 0: Search knowledge base for past solutions ──────────────────
+        kb_context = ""
+        try:
+            past = await search_similar(error_desc, limit=3)
+            if past:
+                lines = [
+                    f"[{i+1}] error_type: {s.get('error_type','?')} | "
+                    f"confidence: {round(s.get('confidence', 0) * 100)}% | "
+                    f"used {s.get('use_count', 1)}x\n"
+                    f"    Root cause:  {s.get('root_cause','')[:200]}\n"
+                    f"    Solution:    {s.get('solution_summary','')[:200]}"
+                    for i, s in enumerate(past)
+                ]
+                kb_context = (
+                    "KNOWLEDGE BASE — Similar past solutions (use as reference, adapt to this project):\n"
+                    + "\n".join(lines)
+                )
+                await self._send(plt, cid,
+                    f"🧠 *Found {len(past)} similar past solution\\(s\\) in KB — injecting as context\\.*"
+                )
+        except Exception:
+            log.warning("KB search failed — continuing without context", exc_info=True)
 
-    session.state = SessionState.COMPLETE
-    await _persist(session)
-    _msg(MessageType.PIPELINE_COMPLETE, AgentRole.ORCHESTRATOR, AgentRole.USER, {}, session)
-    await on_complete()
+        # ── Step 1: Run the fixer ─────────────────────────────────────────────
+        try:
+            fix = await analyze_and_fix(project_path, error_desc, kb_context=kb_context)
+        except Exception as exc:
+            log.exception("fixer error")
+            await self._send(plt, cid, f"❌ Fixer error: {_esc(str(exc))}")
+            return
+
+        changed = "\n".join(
+            f"  • `{_esc(f['path'])}` \\({_esc(f['action'])}\\)"
+            for f in fix["files_changed"]
+        ) or "  _no files changed_"
+        await self._send(plt, cid,
+            f"🔧 *Fix applied*\n\n"
+            f"*Analysis:* {_esc(fix['analysis'])}\n\n"
+            f"*Files changed:*\n{changed}\n\n"
+            f"*Summary:* {_esc(fix['diff_summary'])}\n\n"
+            f"🧪 Running tests\\.\\.\\."
+        )
+
+        # ── Step 2: QA ────────────────────────────────────────────────────────
+        result = None
+        try:
+            result = await run_tests(fix["project_path"], fix["test_command"])
+        except Exception as exc:
+            log.exception("qa_runner error")
+            await self._send(plt, cid, f"❌ QA error: {_esc(str(exc))}")
+
+        fix_worked = result["passed"] if result else False
+        status = "✅ All tests passed" if fix_worked else "❌ Tests failed"
+
+        if result:
+            await self._send_photo(plt, cid, result["screenshot"],
+                f"{status}\nCommand: {fix['test_command'] or 'n/a'}"
+            )
+
+        # ── Step 3: Save to knowledge base ────────────────────────────────────
+        try:
+            # Detect tech stack from file extensions of changed files
+            ext_map = {
+                ".py": "python", ".js": "javascript", ".ts": "typescript",
+                ".jsx": "react", ".tsx": "react", ".go": "go", ".rs": "rust",
+                ".java": "java", ".rb": "ruby", ".php": "php", ".cs": "csharp",
+            }
+            tech_stack: list[str] = []
+            for f in fix["files_changed"]:
+                ext = "." + f["path"].rsplit(".", 1)[-1].lower() if "." in f["path"] else ""
+                tech = ext_map.get(ext)
+                if tech and tech not in tech_stack:
+                    tech_stack.append(tech)
+
+            entry_id = await save_solution(
+                error_description=error_desc,
+                analysis=fix["analysis"],
+                solution_summary=fix["diff_summary"],
+                files_changed=fix["files_changed"],
+                tech_stack=tech_stack,
+                fix_worked=fix_worked,
+            )
+            kb_label = "✅ saved to KB" if fix_worked else "📝 saved to KB (failed — for reference)"
+            log.info("KB entry %s: %s", entry_id, kb_label)
+        except Exception:
+            log.warning("KB save failed", exc_info=True)
+
+    async def _cmd_queue(self, plt: str, cid: str, text: str) -> None:
+        if text.strip() == "/queue list":
+            if not self._queue:
+                await self._send(plt, cid, "📭 Queue is empty\\.")
+            else:
+                lines = [f"{i+1}\\. {_esc(p.requirement[:70])}\\.\\.\\." for i, p in enumerate(self._queue)]
+                await self._send(plt, cid, "📋 *Queue:*\n" + "\n".join(lines))
+            return
+        if text.strip() == "/queue clear":
+            self._queue.clear()
+            await self._send(plt, cid, "🗑️ Queue cleared\\.")
+            return
+        requirement = text[7:].strip()  # strip "/queue "
+        if not requirement:
+            await self._send(plt, cid, "Usage: `/queue <requirement>`")
+            return
+        await self._enqueue(plt, cid, requirement, auto_approve=self._autonomous)
+
+    async def _cmd_auto(self, plt: str, cid: str, text: str) -> None:
+        if "on" in text:
+            self._autonomous = True
+            await self._send(plt, cid, "🤖 Autonomous mode *ON* — projects will auto\\-approve\\.")
+        elif "off" in text:
+            self._autonomous = False
+            await self._send(plt, cid, "👤 Autonomous mode *OFF* — approval required\\.")
+        else:
+            status = "ON 🤖" if self._autonomous else "OFF 👤"
+            await self._send(plt, cid, f"Autonomous mode is currently *{status}*\\.")
+
+    async def _cmd_overnight(self, plt: str, cid: str, requirement: str) -> None:
+        if not requirement:
+            await self._send(plt, cid, "Usage: `/overnight <requirement>`")
+            return
+        await self._enqueue(plt, cid, requirement, auto_approve=True)
+
+    async def _cmd_kb(self, plt: str, cid: str, text: str) -> None:
+        """Handle /kb stats and /kb search <query>."""
+        parts = text.strip().split(None, 2)   # ["/kb", subcommand?, query?]
+        sub = parts[1].lower() if len(parts) > 1 else "stats"
+
+        if sub == "stats":
+            try:
+                s = await get_stats()
+                type_lines = "\n".join(
+                    f"  • {t['type']}: {t['count']}" for t in s["top_types"]
+                ) or "  _none yet_"
+                tech_lines = "\n".join(
+                    f"  • {t['tech']}: {t['count']}" for t in s["top_techs"]
+                ) or "  _none yet_"
+                await self._send(plt, cid,
+                    f"🧠 *Knowledge Base Stats*\n\n"
+                    f"*Total entries:* {s['total']}\n"
+                    f"*Successful fixes:* {s['successful']}\n"
+                    f"*Success rate:* {s['success_rate']}%\n\n"
+                    f"*Top error types:*\n{type_lines}\n\n"
+                    f"*Top tech stacks:*\n{tech_lines}"
+                )
+            except Exception as exc:
+                await self._send(plt, cid, f"❌ KB error: {_esc(str(exc))}")
+
+        elif sub == "search":
+            query = parts[2].strip() if len(parts) > 2 else ""
+            if not query:
+                await self._send(plt, cid, "Usage: `/kb search <query>`")
+                return
+            try:
+                results = await search_for_user(query, limit=5)
+                if not results:
+                    await self._send(plt, cid, "🔍 No matching solutions found in the knowledge base\\.")
+                    return
+                lines = []
+                for i, r in enumerate(results, 1):
+                    worked = "✅" if r.get("fix_worked") else "❌"
+                    conf = round(r.get("confidence", 0) * 100)
+                    lines.append(
+                        f"*{i}\\. {worked} {_esc(r.get('error_type','?'))}* \\({conf}% confidence\\)\n"
+                        f"_{_esc(r.get('error_description','')[:100])}_\n"
+                        f"Root cause: {_esc(r.get('root_cause','')[:150])}\n"
+                        f"Solution: {_esc(r.get('solution_summary','')[:150])}"
+                    )
+                await self._send(plt, cid,
+                    f"🔍 *KB Search: {_esc(query[:50])}*\n\n" + "\n\n".join(lines)
+                )
+            except Exception as exc:
+                await self._send(plt, cid, f"❌ KB search error: {_esc(str(exc))}")
+
+        else:
+            await self._send(plt, cid,
+                "Usage:\n"
+                "• `/kb stats` — knowledge base statistics\n"
+                "• `/kb search <query>` — search past solutions"
+            )
+
+    # ─── Queue ────────────────────────────────────────────────────────────────
+
+    async def _enqueue(self, plt: str, cid: str, requirement: str, auto_approve: bool = False) -> None:
+        project = QueuedProject(
+            chat_id=cid, platform=plt, requirement=requirement,
+            auto_approve=auto_approve, preferences=self._default_prefs.copy(),
+        )
+        self._queue.append(project)
+        auto_label = " \\(auto\\-approve\\)" if auto_approve else ""
+        await self._send(plt, cid,
+            f"📥 *Queued{auto_label}* \\(position {len(self._queue)}\\):\n_{_esc(requirement[:80])}_"
+        )
+        if not self._queue_running:
+            asyncio.create_task(self._run_queue())
+
+    async def _run_queue(self) -> None:
+        self._queue_running = True
+        results = []
+        last_project = None
+        while self._queue:
+            project = self._queue.popleft()
+            last_project = project
+            await self._send(project.platform, project.chat_id,
+                f"🚀 *Starting queued project:*\n_{_esc(project.requirement[:80])}_"
+            )
+            try:
+                await self._clear_session(project.chat_id)
+                session = await self._new_session(project.chat_id, project.requirement)
+                if project.auto_approve:
+                    # Inject preferences context for BA so it can skip clarification
+                    if project.preferences:
+                        session.ba_messages.append({"role": "user", "content":
+                            f"User requirement: {project.requirement}\n"
+                            f"Tech preferences: {json.dumps(project.preferences)}\n"
+                            "Running in autonomous mode — produce BRD directly without asking clarifying questions."
+                        })
+                await self._run_pipeline(project.platform, project.chat_id, session, project.auto_approve)
+                results.append({"requirement": project.requirement, "success": True})
+            except Exception as exc:
+                log.exception("Queue project failed")
+                await self._send(project.platform, project.chat_id, f"❌ Project failed: {_esc(str(exc))}")
+                results.append({"requirement": project.requirement, "success": False, "error": str(exc)})
+        self._queue_running = False
+
+        # Send summary if more than one project ran
+        if len(results) > 1 and last_project:
+            lines = [f"{'✅' if r['success'] else '❌'} {_esc(r['requirement'][:60])}" for r in results]
+            done = sum(1 for r in results if r["success"])
+            await self._send(last_project.platform, last_project.chat_id,
+                f"🌅 *Queue complete — {done}/{len(results)} succeeded*\n\n" + "\n".join(lines)
+            )
+
+    # ─── Text / state routing ─────────────────────────────────────────────────
+
+    async def _handle_text(self, plt: str, cid: str, text: str) -> None:
+        session = await self._get_session(cid)
+        if not session or session.state == SessionState.COMPLETE:
+            if session:
+                await self._clear_session(cid)
+            await self._send(plt, cid,
+                f"🚀 *Starting your project\\!*\n\n"
+                f"Requirement:\n_{_esc(text)}_\n\nThe team is spinning up\\.\\.\\."
+            )
+            session = await self._new_session(cid, text)
+            await self._run_pipeline(plt, cid, session, auto_approve=False)
+
+        elif session.state == SessionState.BA_CLARIFYING:
+            await self._handle_clarification(plt, cid, session, text)
+
+        elif session.state == SessionState.FEEDBACK_PENDING:
+            session.change_feedback = text
+            await self._run_planning(plt, cid, session)
+
+        else:
+            await self._send(plt, cid,
+                f"⏳ The team is still working\\. State: *{_esc(session.state)}*"
+            )
+
+    async def _handle_callback(self, plt: str, cid: str, data: str) -> None:
+        session = await self._get_session(cid)
+        if data.startswith("approve:"):
+            if session and session.state == SessionState.AWAITING_APPROVAL:
+                await self._send(plt, cid, "✅ *Approved\\! Handing off to the dev team\\.\\.\\.*")
+                await self._run_dev(plt, cid, session)
+        elif data.startswith("changes:"):
+            if session:
+                session.state = SessionState.FEEDBACK_PENDING
+                await self._persist(session)
+                await self._send(plt, cid,
+                    "📝 *What would you like to change?*\n\n"
+                    "Describe your feedback and SA, PM, and Tech Lead will revise the documents\\."
+                )
+
+    # ─── Pipeline stages ──────────────────────────────────────────────────────
+
+    async def _run_pipeline(self, plt: str, cid: str, session: ProjectSession, auto_approve: bool) -> None:
+        """BA phase then planning."""
+        await self._send(plt, cid, "🔍 *BA is analysing your requirement\\.\\.\\.*")
+        try:
+            resp = await ba_process_initial(session)
+            await self._handle_ba_resp(plt, cid, session, resp, auto_approve)
+        except Exception as exc:
+            log.exception("BA error")
+            session.state = SessionState.COMPLETE
+            await self._send(plt, cid, f"❌ BA error: {_esc(str(exc))}")
+
+    async def _handle_clarification(self, plt: str, cid: str, session: ProjectSession, answers: str) -> None:
+        if session.clarification_rounds:
+            session.clarification_rounds[-1].answers = answers
+        await self._persist(session)
+        await self._send(plt, cid, "🤔 *BA is reviewing your answers\\.\\.\\.*")
+        try:
+            resp = await ba_process_clarification(session, answers)
+            await self._handle_ba_resp(plt, cid, session, resp, False)
+        except Exception as exc:
+            log.exception("BA clarification error")
+            session.state = SessionState.COMPLETE
+            await self._send(plt, cid, f"❌ Error: {_esc(str(exc))}")
+
+    async def _handle_ba_resp(self, plt: str, cid: str, session: ProjectSession, resp: dict, auto_approve: bool) -> None:
+        if resp.get("status") == "NEEDS_CLARIFICATION" and not auto_approve:
+            session.clarification_rounds.append(ClarificationRound(
+                iteration=resp["iteration"], questions=resp["questions"],
+            ))
+            session.state = SessionState.BA_CLARIFYING
+            await self._persist(session)
+            from core.formatter import fmt_clarification
+            for chunk in fmt_clarification(resp.get("analysis", ""), resp["questions"], resp["iteration"]):
+                await self._send(plt, cid, chunk)
+            return
+        brd = resp.get("brd")
+        if not brd:
+            await self._send(plt, cid, "❌ BA returned no BRD\\.")
+            return
+        session.brd = brd
+        await self._persist(session)
+        for chunk in fmt_brd(brd):
+            await self._send(plt, cid, chunk)
+        await self._run_planning(plt, cid, session, auto_approve)
+
+    async def _run_planning(self, plt: str, cid: str, session: ProjectSession, auto_approve: bool = False) -> None:
+        brd = dict(session.brd)
+        if session.change_feedback:
+            brd["_change_feedback"] = session.change_feedback
+
+        # SA
+        try:
+            session.state = SessionState.SA_PROCESSING
+            await self._send(plt, cid, "🏗️ *Solution Architect is designing the architecture\\.\\.\\.*")
+            arch = await sa_generate(brd)
+            session.architecture = arch
+            await self._persist(session)
+            for chunk in fmt_architecture(arch):
+                await self._send(plt, cid, chunk)
+        except Exception as exc:
+            log.exception("SA error"); await self._send(plt, cid, f"❌ SA error: {_esc(str(exc))}"); return
+
+        # PM
+        try:
+            session.state = SessionState.PM_PROCESSING
+            await self._send(plt, cid, "📅 *Project Manager is creating the plan\\.\\.\\.*")
+            plan = await pm_generate(session.brd, arch)
+            session.project_plan = plan
+            await self._persist(session)
+            for chunk in fmt_project_plan(plan):
+                await self._send(plt, cid, chunk)
+        except Exception as exc:
+            log.exception("PM error"); await self._send(plt, cid, f"❌ PM error: {_esc(str(exc))}"); return
+
+        # Tech Lead
+        try:
+            session.state = SessionState.TECH_LEAD_PROCESSING
+            await self._send(plt, cid, "⚙️ *Tech Lead is writing the technical spec\\.\\.\\.*")
+            spec = await tech_lead_generate(session.brd, arch, plan)
+            session.tech_spec = spec
+            await self._persist(session)
+            for chunk in fmt_tech_spec(spec):
+                await self._send(plt, cid, chunk)
+        except Exception as exc:
+            log.exception("TL error"); await self._send(plt, cid, f"❌ Tech Lead error: {_esc(str(exc))}"); return
+
+        session.state = SessionState.AWAITING_APPROVAL
+        session.change_feedback = None
+        await self._persist(session)
+
+        if auto_approve:
+            await self._send(plt, cid, "🤖 *Autonomous mode — auto\\-approving and starting dev team\\.*")
+            await self._run_dev(plt, cid, session)
+        else:
+            await self._send_approval(plt, cid, session.project_id)
+
+    async def _run_dev(self, plt: str, cid: str, session: ProjectSession) -> None:
+        session.state = SessionState.DEV_PROCESSING
+        pdir = self._workspace.project_dir(session.project_id)
+        await self._send(plt, cid, "🚀 *Dev team starting — Backend and Frontend in parallel\\.\\.\\.*")
+        try:
+            backend_task  = asyncio.create_task(dev_backend_generate(session.brd, session.architecture, session.tech_spec))
+            frontend_task = asyncio.create_task(dev_frontend_generate(session.brd, session.architecture, session.tech_spec))
+            backend_impl, frontend_impl = await asyncio.gather(backend_task, frontend_task)
+        except Exception as exc:
+            log.exception("Dev error"); await self._send(plt, cid, f"❌ Dev error: {_esc(str(exc))}"); return
+
+        session.backend_impl  = backend_impl
+        session.frontend_impl = frontend_impl
+        await self._persist(session)
+
+        for chunk in fmt_backend_impl(backend_impl):
+            await self._send(plt, cid, chunk)
+        for chunk in fmt_frontend_impl(frontend_impl):
+            await self._send(plt, cid, chunk)
+
+        # Write backend files to workspace
+        import json as _json
+        backend_text = _json.dumps(backend_impl)
+        written = self._workspace.extract_and_write_code(pdir, backend_text)
+        frontend_text = _json.dumps(frontend_impl)
+        written += self._workspace.extract_and_write_code(pdir, frontend_text)
+        if written:
+            git = GitIntegration(pdir)
+            await git.init_repo()
+            await git.commit("dev", f"{len(written)} files written")
+
+        # QA
+        try:
+            session.state = SessionState.QA_PROCESSING
+            await self._send(plt, cid, "🧪 *QA Engineer is writing the test plan\\.\\.\\.*")
+            qa = await qa_generate(session.brd, session.tech_spec, backend_impl, frontend_impl)
+            session.qa_plan = qa
+            await self._persist(session)
+            for chunk in fmt_qa_plan(qa):
+                await self._send(plt, cid, chunk)
+        except Exception as exc:
+            log.exception("QA error"); await self._send(plt, cid, f"❌ QA error: {_esc(str(exc))}"); return
+
+        session.state = SessionState.COMPLETE
+        await self._persist(session)
+        self._workspace.write_manifest(pdir, dataclasses.asdict(session))
+        await self._send(plt, cid,
+            f"🎉 *All done\\!*\n\n"
+            f"Your full project package is ready\\.\n"
+            f"📁 Workspace: `{_esc(str(pdir))}`\n\n"
+            f"Send a new requirement to start another project\\."
+        )

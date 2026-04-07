@@ -107,3 +107,22 @@ class ProjectSession:
 
     def touch(self) -> None:
         self.updated_at = datetime.utcnow().isoformat()
+
+
+# ─── Queue & Autonomous mode ─────────────────────────────────────────────────
+
+@dataclass
+class QueuedProject:
+    chat_id: str
+    platform: str
+    requirement: str
+    auto_approve: bool = False
+    preferences: dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
+
+
+class QueueState(str, Enum):
+    PENDING    = "PENDING"
+    PROCESSING = "PROCESSING"
+    DONE       = "DONE"
+    FAILED     = "FAILED"

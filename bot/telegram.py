@@ -1,5 +1,9 @@
 """
-Telegram Bot
+Telegram Bot (DEPRECATED)
+
+DEPRECATED as of v1.0.0 — this module is kept for backward compatibility only.
+The new entry point is main.py, which uses adapters.telegram_adapter.TelegramAdapter.
+This file will be removed in a future version.
 
 Routes user messages to the Orchestrator based on session state.
 Uses inline keyboard buttons for the approval gate.
