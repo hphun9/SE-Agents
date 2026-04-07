@@ -53,3 +53,8 @@ Thumbs.db
 # Node (legacy TypeScript prototype)
 node_modules/
 dist/
+package-lock.json
+yarn.lock
+
+# Docker
+*.env.docker
