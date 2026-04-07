@@ -14,6 +14,7 @@
 | **Autonomous / queue mode** | Queue multiple projects, auto-approve, and wake up to completed results |
 | **Overnight command** | `/overnight <requirement>` — queue with full auto-approve and default tech prefs |
 | **Crash recovery** | MongoDB checkpoints save pipeline state; failed projects can be retried |
+| **Self-learning KB** | Every `/fix` run saves error + root cause + solution to MongoDB; future fixes search past solutions and never start from zero |
 
 ---
 
@@ -125,6 +126,7 @@ se-agents/
 │   ├── claude.py                ← calls `claude -p` CLI
 │   ├── storage.py               ← MongoDB session persistence (motor async)
 │   ├── checkpoint.py            ← pipeline crash recovery
+│   ├── knowledge_base.py        ← self-learning KB: save + search error/solution pairs
 │   └── formatter.py             ← MarkdownV2 formatters per document type
 │
 ├── agents/
@@ -244,6 +246,8 @@ At least one of `TELEGRAM_BOT_TOKEN`, `ZALO_OA_ACCESS_TOKEN`, or `ENABLE_CLI=tru
 | `/queue clear` | Clear the queue |
 | `/auto on\|off` | Toggle autonomous mode (auto-approve all) |
 | `/overnight <requirement>` | Queue + auto-approve + default tech prefs |
+| `/kb stats` | Knowledge base statistics (total, success rate, top error types) |
+| `/kb search <query>` | Search past solutions in the knowledge base |
 | `/help` | All commands + available `/ask` roles |
 
 ---
@@ -341,6 +345,67 @@ Each stage also creates a git commit:
 
 ---
 
+## Self-Learning Knowledge Base
+
+Every time `/fix` runs and QA confirms tests pass, the error + root cause + solution is saved to MongoDB. The **next** time a similar error appears — in any project — the fixer gets the past solution as context, so it never starts from zero on a problem it has already solved.
+
+### How it works
+
+```
+/fix /projects/myapp  Getting 401 on POST /api/auth
+   │
+   ├─► 1. Search KB for similar past errors
+   │       → Found: "JWT token not verified in middleware" (confidence 90%, used 3×)
+   │       → Inject as context into Opus fix prompt
+   │
+   ├─► 2. Opus generates fix (guided by past solution)
+   ├─► 3. Apply fix to disk
+   ├─► 4. QA runs tests → screenshot
+   │
+   └─► 5. Save to KB:
+           error_description, root_cause, solution_summary,
+           tech_stack, fix_worked=True, confidence=0.7
+```
+
+Each subsequent reuse raises the confidence score by `+0.1` (capped at 1.0), so well-proven solutions naturally bubble up in search rankings.
+
+### Knowledge Base schema
+
+| Field | Description |
+|-------|-------------|
+| `error_type` | `auth` \| `database` \| `network` \| `config` \| `logic` \| `type` \| `syntax` \| `other` |
+| `keywords` | Extracted by Haiku for fast text-index search |
+| `tech_stack` | `["python", "fastapi", "jwt", ...]` |
+| `root_cause` | What actually caused the error |
+| `solution_summary` | What was done to fix it |
+| `fix_worked` | `true` if QA passed after applying the fix |
+| `confidence` | 0.0–1.0, increases each reuse |
+| `use_count` | How many times this solution was applied |
+
+### KB commands
+
+```
+/kb stats              → total entries, success rate, top error types & tech stacks
+/kb search jwt 401     → search past solutions matching a query
+```
+
+### Example — KB growing over time
+
+```
+Week 1:  /fix ...  JWT 401 error              → saved (confidence 0.70)
+Week 2:  /fix ...  same JWT pattern elsewhere → reused! confidence → 0.80
+Week 3:  /fix ...  JWT 401 again              → confidence → 0.90, used 3×
+
+/kb stats
+  Total entries:   47
+  Successful fixes: 41
+  Success rate:    87.2%
+  Top error types: auth (12), database (8), config (7)
+  Top tech stacks: python (19), fastapi (11), react (9)
+```
+
+---
+
 ## Example Flows
 
 ### Interactive pipeline
@@ -372,12 +437,13 @@ QA:    Test plan + pytest tests     → written to /projects/task-manager/
 Bot:   🎉 All done! 📁 /projects/task-manager
 ```
 
-### Bug fix
+### Bug fix (with KB context)
 
 ```
 You:   /fix /projects/myapp Getting 401 on every POST /api/auth/login
 
 Bot:   🔍 Dev agent is analysing /projects/myapp...
+Bot:   🧠 Found 2 similar past solution(s) in KB — injecting as context.
 
 Bot:   🔧 Fix applied
          Files changed:

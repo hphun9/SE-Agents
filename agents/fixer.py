@@ -5,9 +5,10 @@ Flow:
   1. List all source files in the project
   2. Ask Claude (Haiku — cheap triage) which files are relevant to the error
   3. Read those files (capped at ~80 KB total)
-  4. Ask Claude (Opus) to generate a precise fix
-  5. Write the changed files back to disk
-  6. Return a fix summary + test command for QA runner
+  4. (Optional) Inject past solutions from the Knowledge Base as context
+  5. Ask Claude (Opus) to generate a precise fix
+  6. Write the changed files back to disk
+  7. Return a fix summary + test command for QA runner
 """
 
 from __future__ import annotations
@@ -90,9 +91,19 @@ async def _triage(file_list: list[str], error: str) -> list[str]:
 
 # ─── Public API ──────────────────────────────────────────────────────────────
 
-async def analyze_and_fix(project_path: str, error_description: str) -> dict:
+async def analyze_and_fix(
+    project_path: str,
+    error_description: str,
+    kb_context: str = "",
+) -> dict:
     """
     Read the project, generate a fix with Opus, apply it to disk.
+
+    Args:
+        project_path:      Absolute path to the project directory.
+        error_description: The error text supplied by the user.
+        kb_context:        Pre-formatted past solutions from the Knowledge Base
+                           (injected as additional context before the Opus call).
 
     Returns:
         {
@@ -130,13 +141,16 @@ async def analyze_and_fix(project_path: str, error_description: str) -> dict:
     if not file_contents:
         raise ValueError("Relevant files are too large to process.")
 
-    # Step 3 — Opus fix generation
+    # Step 3 — Opus fix generation (with optional KB context)
     files_block = "\n\n".join(
         f"=== {p} ===\n{c}" for p, c in file_contents.items()
     )
-    messages = [{"role": "user", "content":
-        f"Error to fix:\n{error_description}\n\n"
-        f"Project files:\n{files_block}"}]
+    user_content = f"Error to fix:\n{error_description}\n\n"
+    if kb_context:
+        user_content += f"{kb_context}\n\n"
+    user_content += f"Project files:\n{files_block}"
+
+    messages = [{"role": "user", "content": user_content}]
 
     raw = await call_claude(MODELS["fixer"], _FIX_SYSTEM, messages)
     fix = parse_json(raw)

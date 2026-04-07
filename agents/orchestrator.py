@@ -36,6 +36,7 @@ from agents.qa import qa_generate
 from agents.fixer import analyze_and_fix
 from agents.qa_runner import run_tests
 from agents.consult import consult_agent, resolve_role, list_roles
+from core.knowledge_base import search_similar, save_solution, get_stats, search_for_user
 from config import MAX_BA_ROUNDS
 from workspace.writer import WorkspaceWriter
 from workspace.git_integration import GitIntegration
@@ -165,6 +166,8 @@ class Orchestrator:
             await self._cmd_auto(plt, cid, text)
         elif text.startswith("/overnight "):
             asyncio.create_task(self._cmd_overnight(plt, cid, text[11:].strip()))
+        elif text.startswith("/kb"):
+            asyncio.create_task(self._cmd_kb(plt, cid, text))
         elif text.startswith("/"):
             await self._send(plt, cid, f"Unknown command\\. Send /help for usage\\.")
         else:
@@ -225,6 +228,8 @@ class Orchestrator:
             "/queue clear — clear queue\n"
             "/auto on|off — toggle autonomous mode\n"
             "/overnight \\<requirement\\> — queue with auto\\-approve\n"
+            "/kb stats — knowledge base statistics\n"
+            "/kb search \\<query\\> — search past solutions\n"
             "/help — this message\n\n"
             f"*Roles for /ask:*\n{list_roles()}"
         )
@@ -257,8 +262,33 @@ class Orchestrator:
             return
         project_path, error_desc = parts[0], parts[1]
         await self._send(plt, cid, f"🔍 *Dev agent is analysing* `{_esc(project_path)}`\\.\\.\\.")
+
+        # ── Step 0: Search knowledge base for past solutions ──────────────────
+        kb_context = ""
         try:
-            fix = await analyze_and_fix(project_path, error_desc)
+            past = await search_similar(error_desc, limit=3)
+            if past:
+                lines = [
+                    f"[{i+1}] error_type: {s.get('error_type','?')} | "
+                    f"confidence: {round(s.get('confidence', 0) * 100)}% | "
+                    f"used {s.get('use_count', 1)}x\n"
+                    f"    Root cause:  {s.get('root_cause','')[:200]}\n"
+                    f"    Solution:    {s.get('solution_summary','')[:200]}"
+                    for i, s in enumerate(past)
+                ]
+                kb_context = (
+                    "KNOWLEDGE BASE — Similar past solutions (use as reference, adapt to this project):\n"
+                    + "\n".join(lines)
+                )
+                await self._send(plt, cid,
+                    f"🧠 *Found {len(past)} similar past solution\\(s\\) in KB — injecting as context\\.*"
+                )
+        except Exception:
+            log.warning("KB search failed — continuing without context", exc_info=True)
+
+        # ── Step 1: Run the fixer ─────────────────────────────────────────────
+        try:
+            fix = await analyze_and_fix(project_path, error_desc, kb_context=kb_context)
         except Exception as exc:
             log.exception("fixer error")
             await self._send(plt, cid, f"❌ Fixer error: {_esc(str(exc))}")
@@ -275,17 +305,50 @@ class Orchestrator:
             f"*Summary:* {_esc(fix['diff_summary'])}\n\n"
             f"🧪 Running tests\\.\\.\\."
         )
+
+        # ── Step 2: QA ────────────────────────────────────────────────────────
+        result = None
         try:
             result = await run_tests(fix["project_path"], fix["test_command"])
         except Exception as exc:
             log.exception("qa_runner error")
             await self._send(plt, cid, f"❌ QA error: {_esc(str(exc))}")
-            return
 
-        status = "✅ All tests passed" if result["passed"] else "❌ Tests failed"
-        await self._send_photo(plt, cid, result["screenshot"],
-            f"{status}\nCommand: {fix['test_command'] or 'n/a'}"
-        )
+        fix_worked = result["passed"] if result else False
+        status = "✅ All tests passed" if fix_worked else "❌ Tests failed"
+
+        if result:
+            await self._send_photo(plt, cid, result["screenshot"],
+                f"{status}\nCommand: {fix['test_command'] or 'n/a'}"
+            )
+
+        # ── Step 3: Save to knowledge base ────────────────────────────────────
+        try:
+            # Detect tech stack from file extensions of changed files
+            ext_map = {
+                ".py": "python", ".js": "javascript", ".ts": "typescript",
+                ".jsx": "react", ".tsx": "react", ".go": "go", ".rs": "rust",
+                ".java": "java", ".rb": "ruby", ".php": "php", ".cs": "csharp",
+            }
+            tech_stack: list[str] = []
+            for f in fix["files_changed"]:
+                ext = "." + f["path"].rsplit(".", 1)[-1].lower() if "." in f["path"] else ""
+                tech = ext_map.get(ext)
+                if tech and tech not in tech_stack:
+                    tech_stack.append(tech)
+
+            entry_id = await save_solution(
+                error_description=error_desc,
+                analysis=fix["analysis"],
+                solution_summary=fix["diff_summary"],
+                files_changed=fix["files_changed"],
+                tech_stack=tech_stack,
+                fix_worked=fix_worked,
+            )
+            kb_label = "✅ saved to KB" if fix_worked else "📝 saved to KB (failed — for reference)"
+            log.info("KB entry %s: %s", entry_id, kb_label)
+        except Exception:
+            log.warning("KB save failed", exc_info=True)
 
     async def _cmd_queue(self, plt: str, cid: str, text: str) -> None:
         if text.strip() == "/queue list":
@@ -321,6 +384,64 @@ class Orchestrator:
             await self._send(plt, cid, "Usage: `/overnight <requirement>`")
             return
         await self._enqueue(plt, cid, requirement, auto_approve=True)
+
+    async def _cmd_kb(self, plt: str, cid: str, text: str) -> None:
+        """Handle /kb stats and /kb search <query>."""
+        parts = text.strip().split(None, 2)   # ["/kb", subcommand?, query?]
+        sub = parts[1].lower() if len(parts) > 1 else "stats"
+
+        if sub == "stats":
+            try:
+                s = await get_stats()
+                type_lines = "\n".join(
+                    f"  • {t['type']}: {t['count']}" for t in s["top_types"]
+                ) or "  _none yet_"
+                tech_lines = "\n".join(
+                    f"  • {t['tech']}: {t['count']}" for t in s["top_techs"]
+                ) or "  _none yet_"
+                await self._send(plt, cid,
+                    f"🧠 *Knowledge Base Stats*\n\n"
+                    f"*Total entries:* {s['total']}\n"
+                    f"*Successful fixes:* {s['successful']}\n"
+                    f"*Success rate:* {s['success_rate']}%\n\n"
+                    f"*Top error types:*\n{type_lines}\n\n"
+                    f"*Top tech stacks:*\n{tech_lines}"
+                )
+            except Exception as exc:
+                await self._send(plt, cid, f"❌ KB error: {_esc(str(exc))}")
+
+        elif sub == "search":
+            query = parts[2].strip() if len(parts) > 2 else ""
+            if not query:
+                await self._send(plt, cid, "Usage: `/kb search <query>`")
+                return
+            try:
+                results = await search_for_user(query, limit=5)
+                if not results:
+                    await self._send(plt, cid, "🔍 No matching solutions found in the knowledge base\\.")
+                    return
+                lines = []
+                for i, r in enumerate(results, 1):
+                    worked = "✅" if r.get("fix_worked") else "❌"
+                    conf = round(r.get("confidence", 0) * 100)
+                    lines.append(
+                        f"*{i}\\. {worked} {_esc(r.get('error_type','?'))}* \\({conf}% confidence\\)\n"
+                        f"_{_esc(r.get('error_description','')[:100])}_\n"
+                        f"Root cause: {_esc(r.get('root_cause','')[:150])}\n"
+                        f"Solution: {_esc(r.get('solution_summary','')[:150])}"
+                    )
+                await self._send(plt, cid,
+                    f"🔍 *KB Search: {_esc(query[:50])}*\n\n" + "\n\n".join(lines)
+                )
+            except Exception as exc:
+                await self._send(plt, cid, f"❌ KB search error: {_esc(str(exc))}")
+
+        else:
+            await self._send(plt, cid,
+                "Usage:\n"
+                "• `/kb stats` — knowledge base statistics\n"
+                "• `/kb search <query>` — search past solutions"
+            )
 
     # ─── Queue ────────────────────────────────────────────────────────────────
 

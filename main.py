@@ -15,8 +15,10 @@ log = logging.getLogger("se_agents")
 
 async def main() -> None:
     from core.storage import init_db
+    from core.knowledge_base import init_kb
     await init_db()
-    log.info("MongoDB initialised")
+    await init_kb()
+    log.info("MongoDB initialised (sessions + knowledge base)")
 
     from agents.orchestrator import Orchestrator
     orchestrator = Orchestrator()
