@@ -13,6 +13,7 @@ import logging
 import os
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from adapters.base import ChatAdapter, IncomingMessage, OutgoingMessage
@@ -90,6 +91,33 @@ class Orchestrator:
             task.cancel()
             return True
         return False
+
+    @asynccontextmanager
+    async def _typing(self, platform: str, chat_id: str):
+        """
+        Show 'typing...' indicator in Telegram (or equivalent) for the duration
+        of a long-running operation.  Pulses every 4 s — Telegram shows it for ~5 s.
+        Usage:
+            async with self._typing(plt, cid):
+                result = await some_slow_agent_call(...)
+        """
+        adapter = self._adapter_for(platform)
+
+        async def _pulse():
+            while True:
+                if adapter:
+                    await adapter.send_chat_action(chat_id, "typing")
+                await asyncio.sleep(4)
+
+        task = asyncio.create_task(_pulse())
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # ─── Session helpers ─────────────────────────────────────────────────────
 
@@ -276,7 +304,8 @@ class Orchestrator:
         session = await self._get_session(cid)
         await self._send(plt, cid, f"⏳ Consulting {_esc(parts[0])}\\.\\.\\.")
         try:
-            response = await consult_agent(role_key, parts[1], session)
+            async with self._typing(plt, cid):
+                response = await consult_agent(role_key, parts[1], session)
             await self._send(plt, cid, response)
         except Exception as exc:
             log.exception("consult_agent error")
@@ -299,7 +328,8 @@ class Orchestrator:
         await self._send(plt, cid, "🤖 *Secretary is thinking\\.\\.\\.*")
         session = await self._get_session(cid)
         try:
-            result = await secretary_dispatch(message, session)
+            async with self._typing(plt, cid):
+                result = await secretary_dispatch(message, session)
         except Exception as exc:
             log.exception("secretary error")
             await self._send(plt, cid, f"❌ Secretary error: {_esc(str(exc))}")
@@ -367,7 +397,8 @@ class Orchestrator:
 
         # ── Step 1: Run the fixer ─────────────────────────────────────────────
         try:
-            fix = await analyze_and_fix(project_path, error_desc, kb_context=kb_context)
+            async with self._typing(plt, cid):
+                fix = await analyze_and_fix(project_path, error_desc, kb_context=kb_context)
         except Exception as exc:
             log.exception("fixer error")
             await self._send(plt, cid, f"❌ Fixer error: {_esc(str(exc))}")
@@ -388,7 +419,8 @@ class Orchestrator:
         # ── Step 2: QA ────────────────────────────────────────────────────────
         result = None
         try:
-            result = await run_tests(fix["project_path"], fix["test_command"])
+            async with self._typing(plt, cid):
+                result = await run_tests(fix["project_path"], fix["test_command"])
         except Exception as exc:
             log.exception("qa_runner error")
             await self._send(plt, cid, f"❌ QA error: {_esc(str(exc))}")
@@ -615,7 +647,8 @@ class Orchestrator:
         - "secretary" → greet / explain capabilities
         """
         try:
-            result = await secretary_dispatch(text)
+            async with self._typing(plt, cid):
+                result = await secretary_dispatch(text)
         except Exception as exc:
             log.exception("secretary_gate classification failed")
             # Fall back to treating it as a project requirement
@@ -660,7 +693,8 @@ class Orchestrator:
         """BA phase then planning."""
         await self._send(plt, cid, "🔍 *BA is analysing your requirement\\.\\.\\.*")
         try:
-            resp = await ba_process_initial(session)
+            async with self._typing(plt, cid):
+                resp = await ba_process_initial(session)
             await self._handle_ba_resp(plt, cid, session, resp, auto_approve)
         except Exception as exc:
             log.exception("BA error")
@@ -673,7 +707,8 @@ class Orchestrator:
         await self._persist(session)
         await self._send(plt, cid, "🤔 *BA is reviewing your answers\\.\\.\\.*")
         try:
-            resp = await ba_process_clarification(session, answers)
+            async with self._typing(plt, cid):
+                resp = await ba_process_clarification(session, answers)
             await self._handle_ba_resp(plt, cid, session, resp, False)
         except Exception as exc:
             log.exception("BA clarification error")
@@ -710,7 +745,8 @@ class Orchestrator:
         try:
             session.state = SessionState.SA_PROCESSING
             await self._send(plt, cid, "🏗️ *Solution Architect is designing the architecture\\.\\.\\.*")
-            arch = await sa_generate(brd)
+            async with self._typing(plt, cid):
+                arch = await sa_generate(brd)
             session.architecture = arch
             await self._persist(session)
             for chunk in fmt_architecture(arch):
@@ -722,7 +758,8 @@ class Orchestrator:
         try:
             session.state = SessionState.PM_PROCESSING
             await self._send(plt, cid, "📅 *Project Manager is creating the plan\\.\\.\\.*")
-            plan = await pm_generate(session.brd, arch)
+            async with self._typing(plt, cid):
+                plan = await pm_generate(session.brd, arch)
             session.project_plan = plan
             await self._persist(session)
             for chunk in fmt_project_plan(plan):
@@ -734,7 +771,8 @@ class Orchestrator:
         try:
             session.state = SessionState.TECH_LEAD_PROCESSING
             await self._send(plt, cid, "⚙️ *Tech Lead is writing the technical spec\\.\\.\\.*")
-            spec = await tech_lead_generate(session.brd, arch, plan)
+            async with self._typing(plt, cid):
+                spec = await tech_lead_generate(session.brd, arch, plan)
             session.tech_spec = spec
             await self._persist(session)
             for chunk in fmt_tech_spec(spec):
@@ -757,9 +795,10 @@ class Orchestrator:
         pdir = self._workspace.project_dir(session.project_id)
         await self._send(plt, cid, "🚀 *Dev team starting — Backend and Frontend in parallel\\.\\.\\.*")
         try:
-            backend_task  = asyncio.create_task(dev_backend_generate(session.brd, session.architecture, session.tech_spec))
-            frontend_task = asyncio.create_task(dev_frontend_generate(session.brd, session.architecture, session.tech_spec))
-            backend_impl, frontend_impl = await asyncio.gather(backend_task, frontend_task)
+            async with self._typing(plt, cid):
+                backend_task  = asyncio.create_task(dev_backend_generate(session.brd, session.architecture, session.tech_spec))
+                frontend_task = asyncio.create_task(dev_frontend_generate(session.brd, session.architecture, session.tech_spec))
+                backend_impl, frontend_impl = await asyncio.gather(backend_task, frontend_task)
         except Exception as exc:
             log.exception("Dev error"); await self._send(plt, cid, f"❌ Dev error: {_esc(str(exc))}"); return
 
@@ -787,7 +826,8 @@ class Orchestrator:
         try:
             session.state = SessionState.QA_PROCESSING
             await self._send(plt, cid, "🧪 *QA Engineer is writing the test plan\\.\\.\\.*")
-            qa = await qa_generate(session.brd, session.tech_spec, backend_impl, frontend_impl)
+            async with self._typing(plt, cid):
+                qa = await qa_generate(session.brd, session.tech_spec, backend_impl, frontend_impl)
             session.qa_plan = qa
             await self._persist(session)
             for chunk in fmt_qa_plan(qa):
