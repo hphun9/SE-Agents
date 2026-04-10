@@ -60,6 +60,8 @@ class Orchestrator:
         self._autonomous = False
         self._default_prefs: dict = {}
         self._workspace = WorkspaceWriter(os.getenv("PROJECTS_DIR", "/tmp/projects"))
+        # One cancellable pipeline task per chat — cancelled by /new
+        self._pipeline_tasks: dict[str, asyncio.Task] = {}
 
     # ─── Adapter registry ────────────────────────────────────────────────────
 
@@ -68,6 +70,26 @@ class Orchestrator:
 
     def _adapter_for(self, platform: str) -> Optional[ChatAdapter]:
         return self._adapters.get(platform)
+
+    # ─── Task management ─────────────────────────────────────────────────────
+
+    def _track_task(self, cid: str, coro) -> asyncio.Task:
+        """Start a coroutine as a tracked task, cancelling any existing one for this chat."""
+        old = self._pipeline_tasks.pop(cid, None)
+        if old and not old.done():
+            old.cancel()
+        task = asyncio.create_task(coro)
+        self._pipeline_tasks[cid] = task
+        task.add_done_callback(lambda _: self._pipeline_tasks.pop(cid, None))
+        return task
+
+    def _cancel_task(self, cid: str) -> bool:
+        """Cancel the running pipeline task for this chat. Returns True if one was running."""
+        task = self._pipeline_tasks.pop(cid, None)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return False
 
     # ─── Session helpers ─────────────────────────────────────────────────────
 
@@ -160,7 +182,7 @@ class Orchestrator:
         elif text.startswith("/ask "):
             asyncio.create_task(self._cmd_ask(plt, cid, text[5:].strip()))
         elif text.lower().startswith("/s ") or text.lower() == "/s":
-            asyncio.create_task(self._cmd_secretary(plt, cid, text.split(None, 1)[1].strip() if " " in text else ""))
+            self._track_task(cid, self._cmd_secretary(plt, cid, text.split(None, 1)[1].strip() if " " in text else ""))
         elif text.startswith("/fix "):
             asyncio.create_task(self._cmd_fix(plt, cid, text[5:].strip()))
         elif text.startswith("/queue"):
@@ -175,7 +197,7 @@ class Orchestrator:
             await self._send(plt, cid, f"Unknown command\\. Send /help for usage\\.")
         else:
             # ── Plain text → pipeline input ──
-            asyncio.create_task(self._handle_text(plt, cid, text))
+            self._track_task(cid, self._handle_text(plt, cid, text))
 
     # ─── Command handlers ─────────────────────────────────────────────────────
 
@@ -187,8 +209,12 @@ class Orchestrator:
         )
 
     async def _cmd_new(self, plt: str, cid: str) -> None:
+        was_running = self._cancel_task(cid)
         await self._clear_session(cid)
-        await self._send(plt, cid, "🆕 Session cleared\\. Send a requirement to start\\.")
+        msg = "🆕 Session cleared\\."
+        if was_running:
+            msg += " \\(pipeline stopped\\)"
+        await self._send(plt, cid, msg + " Send a requirement to start\\.")
 
     async def _cmd_status(self, plt: str, cid: str) -> None:
         session = await self._get_session(cid)
@@ -557,10 +583,17 @@ class Orchestrator:
         if not session or session.state == SessionState.COMPLETE:
             if session:
                 await self._clear_session(cid)
-            asyncio.create_task(self._secretary_gate(plt, cid, text))
+            await self._secretary_gate(plt, cid, text)
 
         # ── Mid-pipeline: pass answer back into the active flow ───────────────
         elif session.state == SessionState.BA_CLARIFYING:
+            # Short messages (greetings, confusion) — remind the user what's happening
+            if len(text.split()) <= 2 and len(text) < 20:
+                await self._send(plt, cid,
+                    "↩️ *BA is waiting for your answers above\\.*\n\n"
+                    "Reply with your answers to continue, or /new to start fresh\\."
+                )
+                return
             await self._handle_clarification(plt, cid, session, text)
 
         elif session.state == SessionState.FEEDBACK_PENDING:
