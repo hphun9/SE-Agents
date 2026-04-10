@@ -106,6 +106,13 @@ class TelegramAdapter(ChatAdapter):
                 except Exception as e2:
                     log.error("send_message failed: %s", e2)
 
+    async def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        if self._app:
+            try:
+                await self._app.bot.send_chat_action(int(chat_id), action)
+            except Exception:
+                pass
+
     async def stop(self) -> None:
         if self._app:
             await self._app.updater.stop()

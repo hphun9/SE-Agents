@@ -37,3 +37,7 @@ class ChatAdapter(ABC):
     @property
     @abstractmethod
     def platform_name(self) -> str: ...
+
+    async def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        """Send a transient chat action (e.g. 'typing'). No-op by default."""
+        pass
